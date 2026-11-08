@@ -1,0 +1,9 @@
+{
+  "width": 768,
+  "height": 512,
+  "icon_size": 104,
+  "icon_locations": {
+    "Android File Transfer.app": [200, 262],
+    "Applications": [568, 262]
+  }
+}

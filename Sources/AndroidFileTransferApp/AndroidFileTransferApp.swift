@@ -20,8 +20,8 @@ struct AndroidFileTransferApp: App {
                 }
         }
         .defaultSize(width: 1360, height: 820)
+        #if DEBUG
         .commands {
-            #if DEBUG
             CommandMenu(model.l10n.t("debug.menu")) {
                 Button(model.l10n.t("debug.uploadHome")) {
                     model.debugUploadHomeFile(named: "skills-lock.json")
@@ -87,8 +87,8 @@ struct AndroidFileTransferApp: App {
                     model.debugResumeQueue()
                 }
             }
-            #endif
         }
+        #endif
 
         Settings {
             SettingsView(appModel: model, l10n: model.l10n)

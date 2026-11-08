@@ -1,81 +1,135 @@
-# Android File Transfer (Swift)
-
-A native macOS MTP client for browsing and transferring files between a Mac and Android devices over USB — written entirely in Swift with SwiftUI and Apple's IOUSBHost framework.
+# Android File Transfer
 
 **English** · [简体中文](README.zh-CN.md)
 
-## Overview
+Browse your Android phone from your Mac, move files in either direction, and manage transfers in one native window.
 
-Android File Transfer (Swift) talks to Android devices directly through Apple's `IOUSBHost` framework — no Go runtime, no libusb, no `kalam.dylib`, and no FFI/JSON bridge. The MTP protocol stack and the SwiftUI interface are both implemented in this repository.
+Built with Swift and SwiftUI for **macOS 15 and later**. The app communicates over USB using MTP through Apple's IOUSBHost framework. File transfer requires neither ADB nor USB debugging.
 
-> This is an independent project and is not affiliated with Google's Android File Transfer app.
+![Android File Transfer: local files, device pane, and connection guidance](docs/images/main-en.png)
 
-## Features
+*The current interface in English, browsing this repository. No Android device is connected in this screenshot.*
 
-- Native SwiftUI interface with a sidebar and dual panes (local / device)
-- Browse internal storage and SD cards, including category storage
-- Upload and download files and nested folders with recursive progress
-- Persistent multi-job transfer queue that survives relaunch
-- Pause, resume, cancel, retry, and per-job progress
-- Conflict handling: Replace, Keep Both, or Cancel
-- Batch delete, including recursive folder deletion
-- Drag files or folders from Finder onto the device, and drag device files back to Finder
-- Quick Look for local and device files
-- IOKit hotplug notifications with automatic reconnect
-- English and Simplified Chinese, with live language switching
-- First-run onboarding, native Settings, and a File Access permission guide
-- Full Disk Access helper with direct links to the relevant privacy panes
+[Release downloads](https://github.com/umbrella22/Android-File-Transfer/releases) · [Build from source](#build-from-source) · [Report an issue](https://github.com/umbrella22/Android-File-Transfer/issues)
 
-## Requirements
+## What it does
 
-- macOS 15 or later
-- Swift 6 toolchain (Xcode 26 or later)
-- An Android device that supports MTP (select **File Transfer / MTP** after connecting)
+| | Capabilities |
+| --- | --- |
+| Browse | Side-by-side Mac and phone panes, folder navigation, internal storage and device-exposed SD cards or storage categories. |
+| Transfer | Upload and download files or entire folders, with recursive progress and a persistent job queue. |
+| Manage | Pause, resume, cancel, and retry jobs. Resolve name conflicts by replacing, keeping both, or canceling. Delete selected phone files and folders. |
+| Preview | Quick Look for local files and phone files. Phone previews are downloaded to a local cache first. |
+| Work with Finder | Drop Finder files and folders into the phone pane to upload. Drag a phone file or folder out to Finder to download. |
+| Make it yours | Switch between English and Simplified Chinese, show hidden local files, and open the file-access permission guide from Settings. |
 
-## Quick start
+## Connect and transfer
+
+1. Download `Android-File-Transfer-macOS-universal.dmg` from a tagged [Release](https://github.com/umbrella22/Android-File-Transfer/releases), when available. Open the disk image and drag **Android File Transfer** onto the **Applications** folder in the installer window. The universal build includes Apple Silicon and Intel support.
+2. Open **Android File Transfer** from Applications on the Mac's internal disk, then eject the installer disk. Builds currently use ad-hoc signing and are not notarized. If macOS blocks a downloaded copy that you trust, use **System Settings → Privacy & Security → Open Anyway** when that option is available.
+3. Connect the phone with a USB data cable, unlock it, and select **File Transfer / MTP** in its USB settings.
+4. Select a phone storage in the sidebar. Browse a local folder on the left and a phone folder on the right, then upload or download your selection.
+
+Tagged release packages also include `SHA256SUMS`. To verify a downloaded DMG, place both files in the same folder and run:
+
+```sh
+shasum -a 256 -c SHA256SUMS
+```
+
+![Drag-to-install DMG with the app, Applications shortcut, and bilingual instructions](docs/images/dmg-installer.png)
+
+*Open the DMG, then drag the app onto Applications.*
+
+### Everyday actions
+
+| Action | How |
+| --- | --- |
+| Open a folder | Double-click it in either pane. |
+| Open a local file | Double-click to open it with its default macOS application. |
+| Download a phone file | Double-click it, or select it and choose **Download** (`⌘D`). |
+| Upload local items | Select them and choose **Upload** (`⌘U`), or drop files from Finder into the phone pane. |
+| Preview a selection | Use the eye button or **Quick Look** in the context menu. |
+| View queued transfers | Choose **Transfers** in the toolbar (`⌘J`). |
+
+## Permissions and connection help
+
+Local folder access follows macOS privacy permissions. Allow access when macOS requests it. If access was denied, use **Settings → File Access Permissions…** to open the relevant system settings and check again. Full Disk Access is optional.
+
+<img src="docs/images/settings-en.png" alt="Settings: language, hidden files, file-access permissions, and app version" width="440">
+
+- **Phone does not appear:** unlock it, check that the cable supports data, choose File Transfer / MTP, and use Refresh.
+- **MTP interface is busy:** close other MTP clients and apps using the phone, such as Image Capture or Photos, then reconnect.
+- **A local folder is inaccessible:** check Files and Folders permissions. Run the app from the internal disk; launching it from a removable volume can introduce additional privacy prompts.
+
+## Build from source
+
+Development requires **Xcode 26 or later with a Swift 6 toolchain**. The Swift package contains the app, protocol implementation, and tests, with no third-party package dependencies.
 
 ```sh
 git clone https://github.com/umbrella22/Android-File-Transfer.git
 cd Android-File-Transfer
 
-swift build
-swift test          # 18 tests
+swift test
 ./Scripts/build-app.sh debug --install
 open "$HOME/Applications/Android File Transfer.app"
 ```
 
-The app must run from the internal disk. Running the bundle directly from a removable or project volume can trigger macOS privacy prompts; `--install` copies it to `~/Applications` first.
+The build script assembles the executable, icon, and localized bundle metadata, applies an ad-hoc signature, and writes `dist/Android File Transfer.app`. `--install` copies it to `~/Applications`.
 
-## Project structure
+For a universal release build:
 
-```
-Sources/AndroidFileTransferKit/    MTP/PTP protocol stack and USB transport
-Sources/AndroidFileTransferApp/    SwiftUI macOS app
-AppBundle/                         Info.plist, app icon, en/zh-Hans metadata
-Scripts/build-app.sh               Build, copy resources, ad-hoc sign, install
-Tests/AndroidFileTransferKitTests/ Codec, dataset, and mock-session tests
+```sh
+./Scripts/build-app.sh release --universal
 ```
 
-## Architecture
+`--install` and `--universal` can be combined.
 
-`AndroidFileTransferKit` is split into three layers:
+To package the universal app as a drag-to-install DMG, install Python 3.10 or later and run:
 
-- **PTP** — container codec, MTP UTF-16 strings, and dataset types.
-- **USB** — the `USBTransport` byte-pipe abstraction; `IOUSBHostTransport` is the production implementation.
-- **MTP** — `MTPDeviceSession`, an actor that serializes every transaction behind a FIFO bus gate.
+```sh
+./Scripts/build-dmg.sh
+```
 
-The app depends only on the transport abstraction, so another USB backend can be added without touching the MTP or UI layers.
+The script installs pinned packaging dependencies into `.build/dmg-tools`, creates the DMG with its bilingual background and Applications shortcut, then mounts it read-only to verify the layout, both executable architectures, and the app's signature after copying it out. It writes `dist/Android-File-Transfer-macOS-universal.dmg`. Packaging runs without Finder automation or an image-generation API call.
 
-## Status
+## Publish a release
 
-- 18 unit tests pass (PTP codec, datasets, and mock MTP session).
-- Hardware-verified on a nubia Z70 Ultra (MTP 6/1/1), including 4.1 GB upload/download round-trips with matching SHA-256 values.
-- Still pending: physical unplug during a transfer, sleep/wake, and a wider vendor matrix.
+Update `CFBundleShortVersionString` and `CFBundleVersion` in [AppBundle/Info.plist](AppBundle/Info.plist), then commit and push the release changes. Push a tag to start the [release workflow](.github/workflows/release.yml):
 
-## Known limitations
+```sh
+git tag v0.1.0
+git push origin v0.1.0
+```
 
-- Pause/resume restarts the current job from the beginning; there is no byte-level resume.
-- Drag-out supports a single file or a single folder, not multi-selection.
-- Uploading a symbolic link itself is not supported.
-- Only English and Simplified Chinese are translated.
-- Builds are ad-hoc signed; notarization and App Store packaging are not set up yet.
+Every pushed tag triggers the workflow. It uses Xcode 26.3 on macOS 15 to run tests, build the universal app, and create and verify the drag-to-install DMG. It then publishes a GitHub Release with generated notes and these attachments:
+
+- `Android-File-Transfer-macOS-universal.dmg`
+- `SHA256SUMS`
+
+Authentication uses the built-in `GITHUB_TOKEN`; no additional secrets are required. Rerunning the workflow replaces same-named assets on an existing release. The tag identifies the release; it does not rewrite the version inside the app.
+
+## Inside the project
+
+| Location | Responsibility |
+| --- | --- |
+| [Sources/AndroidFileTransferApp](Sources/AndroidFileTransferApp) | SwiftUI windows, browsing, Quick Look, localization, and the persistent transfer queue. |
+| [Sources/AndroidFileTransferKit/PTP](Sources/AndroidFileTransferKit/PTP) | PTP containers, datasets, and string encoding. |
+| [Sources/AndroidFileTransferKit/USB](Sources/AndroidFileTransferKit/USB) | USB interface discovery and IOUSBHost transport. |
+| [Sources/AndroidFileTransferKit/MTP](Sources/AndroidFileTransferKit/MTP) | MTP sessions and file operations; transactions pass through a serialized session gate. |
+| [AppBundle](AppBundle) | App metadata, icon, and localized bundle resources. |
+| [AppBundle/DMG](AppBundle/DMG) | Installer artwork, bilingual background, and Finder layout. |
+| [Scripts/build-dmg.sh](Scripts/build-dmg.sh) | DMG packaging and mounted-image verification. |
+| [Tests/AndroidFileTransferKitTests](Tests/AndroidFileTransferKitTests) | Codec, dataset, and mock-transport session tests. |
+
+`swift test` checks protocol behavior without a phone. Device compatibility, unplugging during transfers, and sleep/wake behavior require separate hardware testing.
+
+## Current limits
+
+- Resume restarts the current job from the beginning; transfers do not resume at a byte offset.
+- Dragging out to Finder supports one phone file or folder at a time. Use the Download action for multiple selected items.
+- Symbolic links are not uploaded as links; recursive folder uploads skip them.
+- Installing APK, APKS, APKM, or XAPK packages is not implemented. These files can be transferred like other files.
+- English and Simplified Chinese are the available interface languages.
+- Developer ID signing, notarization, and App Store distribution are not configured.
+
+This is an independent project and is not affiliated with Google's Android File Transfer app.
