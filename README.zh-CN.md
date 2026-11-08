@@ -108,6 +108,8 @@ git push origin v0.1.0
 
 认证使用内置的 `GITHUB_TOKEN`，无需额外配置 secrets。重新运行流水线会替换已有 Release 中的同名附件。Tag 用于标识发布版本，不会自动改写应用内的版本号。
 
+重新构建已有 tag 时，可打开 **Actions → Release → Run workflow**，在 `tag` 字段填写版本标签。流水线会使用所选分支上的工作流，检出该 tag 的源码，并发布到对应的 Release。
+
 ## 项目结构
 
 | 位置 | 职责 |

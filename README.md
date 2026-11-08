@@ -108,6 +108,8 @@ Every pushed tag triggers the workflow. It uses Xcode 26.3 on macOS 15 to run te
 
 Authentication uses the built-in `GITHUB_TOKEN`; no additional secrets are required. Rerunning the workflow replaces same-named assets on an existing release. The tag identifies the release; it does not rewrite the version inside the app.
 
+To rebuild an existing tag, open **Actions → Release → Run workflow** and enter the tag in the `tag` field. This checks out the tagged source and publishes to that tag's release, using the workflow from the selected branch.
+
 ## Inside the project
 
 | Location | Responsibility |
