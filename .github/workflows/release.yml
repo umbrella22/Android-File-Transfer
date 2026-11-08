@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: Existing release tag to build (for example, v0.1.0)
+        description: Existing release tag to build (for example, v0.1.1)
         required: true
         type: string
 
@@ -52,7 +52,7 @@ jobs:
           app='dist/Android File Transfer.app'
           plutil -lint "$app/Contents/Info.plist"
           for arch in arm64 x86_64; do
-            lipo -verify_arch "$arch" "$app/Contents/MacOS/AndroidFileTransferApp"
+            lipo "$app/Contents/MacOS/AndroidFileTransferApp" -verify_arch "$arch"
           done
           codesign --verify --deep --strict --verbose=2 "$app"
 

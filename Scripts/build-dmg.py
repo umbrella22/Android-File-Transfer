@@ -34,7 +34,7 @@ def verify_app(app):
     run("plutil", "-lint", app / "Contents" / "Info.plist")
     run("codesign", "--verify", "--deep", "--strict", app)
     for arch in ("arm64", "x86_64"):
-        run("lipo", "-verify_arch", arch, app / "Contents/MacOS/AndroidFileTransferApp")
+        run("lipo", app / "Contents/MacOS/AndroidFileTransferApp", "-verify_arch", arch)
 
 
 def verify_image(image, work, layout):

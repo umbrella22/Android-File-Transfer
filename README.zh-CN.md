@@ -97,8 +97,8 @@ open "$HOME/Applications/Android File Transfer.app"
 更新 [AppBundle/Info.plist](AppBundle/Info.plist) 中的 `CFBundleShortVersionString` 和 `CFBundleVersion`，提交并推送发布相关修改，然后推送 tag，启动[发布流水线](.github/workflows/release.yml)：
 
 ```sh
-git tag v0.1.0
-git push origin v0.1.0
+git tag v0.1.1
+git push origin v0.1.1
 ```
 
 所有推送的 tag 都会触发流水线。它在 macOS 15 上使用 Xcode 26.3 运行测试，构建通用版应用，生成并验证拖拽安装 DMG，随后创建带有自动生成发布说明的 GitHub Release，附带：

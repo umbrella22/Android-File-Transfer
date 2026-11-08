@@ -97,8 +97,8 @@ The script installs pinned packaging dependencies into `.build/dmg-tools`, creat
 Update `CFBundleShortVersionString` and `CFBundleVersion` in [AppBundle/Info.plist](AppBundle/Info.plist), then commit and push the release changes. Push a tag to start the [release workflow](.github/workflows/release.yml):
 
 ```sh
-git tag v0.1.0
-git push origin v0.1.0
+git tag v0.1.1
+git push origin v0.1.1
 ```
 
 Every pushed tag triggers the workflow. It uses Xcode 26.3 on macOS 15 to run tests, build the universal app, and create and verify the drag-to-install DMG. It then publishes a GitHub Release with generated notes and these attachments:
