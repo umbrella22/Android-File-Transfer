@@ -14,14 +14,17 @@ enum AppLanguage: String, CaseIterable, Identifiable, Hashable {
 final class Localization {
     private static let defaultsKey = "appLanguage"
 
+    private let defaults: UserDefaults
+
     var language: AppLanguage {
         didSet {
-            UserDefaults.standard.set(language.rawValue, forKey: Self.defaultsKey)
+            defaults.set(language.rawValue, forKey: Self.defaultsKey)
         }
     }
 
-    init() {
-        let raw = UserDefaults.standard.string(forKey: Self.defaultsKey)
+    init(defaults: UserDefaults = .standard) {
+        self.defaults = defaults
+        let raw = defaults.string(forKey: Self.defaultsKey)
             ?? AppLanguage.system.rawValue
         language = AppLanguage(rawValue: raw) ?? .system
     }
@@ -66,6 +69,8 @@ final class Localization {
         "sidebar.devices": "Devices",
         "sidebar.noDevice": "No Android device",
         "sidebar.refresh": "Refresh",
+        "sidebar.connecting": "Connecting…",
+        "sidebar.capacity": "%@ free of %@",
 
         "access.title": "File Access Permissions",
         "access.subtitle": "Choose how Android File Transfer may read protected folders and external volumes.",
@@ -95,13 +100,21 @@ final class Localization {
         "header.refresh": "Refresh",
         "header.upload": "Upload",
         "header.download": "Download",
+        "header.uploadToPhone": "Upload to Phone",
+        "header.downloadToMac": "Download to Mac",
+        "header.uploadHelp": "Upload to %@",
+        "header.downloadHelp": "Download to %@",
         "header.delete": "Delete",
         "header.quickLook": "Quick Look",
+        "pane.phone": "Phone",
 
         "column.name": "Name",
         "column.size": "Size",
         "column.dateModified": "Date Modified",
         "context.open": "Open",
+        "context.showInFinder": "Show in Finder",
+        "drop.upload": "Upload to %@",
+        "drop.download": "Download to %@",
         "transfer.dismiss": "Dismiss",
 
         "toolbar.transfers": "Transfers",
@@ -136,6 +149,7 @@ final class Localization {
         "empty.selectStorage.description": "Choose Internal storage or the SD card in the sidebar.",
         "empty.error.title": "Cannot list this folder",
         "empty.error.retry": "Retry",
+        "empty.folder": "This folder is empty",
 
         "transfer.preparing": "Preparing %@…",
         "transfer.downloading": "Downloading %@",
@@ -150,12 +164,18 @@ final class Localization {
         "transfer.done": "Done",
         "transfer.canceled": "Canceled",
         "transfer.savedDownloads": "Saved to Downloads",
+        "transfer.queued": "%d queued",
+        "transfer.showQueue": "Show transfer queue",
+        "transfer.waiting": "%d waiting",
+        "transfer.savedTo": "Saved to %@",
         "transfer.savedFolder": "Saved folder to Downloads",
         "transfer.uploadedTo": "Uploaded to %@",
         "transfer.uploaded": "Uploaded %@",
         "transfer.deleted": "Deleted",
 
         "alerts.noDevice": "No Android device is connected.",
+        "alerts.expiredDrag": "The phone connection changed. Drag the item again.",
+        "alerts.downloadDestination": "Download destination is unavailable or not writable: %@",
         "alerts.noStorage": "No Android storage is selected.",
         "alerts.selectPhone": "Select a file or folder on the phone first.",
         "alerts.selectLocal": "Select a local file or folder first.",
@@ -187,6 +207,9 @@ final class Localization {
         "general.language": "Language",
         "general.system": "System",
 
+        "updates.check": "Check for Updates…",
+        "updates.autoCheck": "Automatically check for updates",
+        "updates.autoDownload": "Automatically download and install updates",
         "settings.title": "Settings",
         "settings.general": "General",
         "settings.browsing": "Browsing",
@@ -228,6 +251,8 @@ final class Localization {
         "sidebar.devices": "设备",
         "sidebar.noDevice": "未连接 Android 设备",
         "sidebar.refresh": "刷新",
+        "sidebar.connecting": "正在连接…",
+        "sidebar.capacity": "共 %2$@，可用 %1$@",
 
         "access.title": "文件访问权限",
         "access.subtitle": "选择 Android File Transfer 读取受保护文件夹和外接卷的方式。",
@@ -257,13 +282,21 @@ final class Localization {
         "header.refresh": "刷新",
         "header.upload": "上传",
         "header.download": "下载",
+        "header.uploadToPhone": "上传到手机",
+        "header.downloadToMac": "下载到 Mac",
+        "header.uploadHelp": "上传到“%@”",
+        "header.downloadHelp": "下载到“%@”",
         "header.delete": "删除",
         "header.quickLook": "快速查看",
+        "pane.phone": "手机",
 
         "column.name": "名称",
         "column.size": "大小",
         "column.dateModified": "修改日期",
         "context.open": "打开",
+        "context.showInFinder": "在访达中显示",
+        "drop.upload": "上传到“%@”",
+        "drop.download": "下载到“%@”",
         "transfer.dismiss": "关闭",
 
         "toolbar.transfers": "传输队列",
@@ -298,6 +331,7 @@ final class Localization {
         "empty.selectStorage.description": "在侧边栏选择内部存储或 SD 卡。",
         "empty.error.title": "无法列出此文件夹",
         "empty.error.retry": "重试",
+        "empty.folder": "此文件夹为空",
 
         "transfer.preparing": "正在准备 %@…",
         "transfer.downloading": "正在下载 %@",
@@ -312,12 +346,18 @@ final class Localization {
         "transfer.done": "完成",
         "transfer.canceled": "已取消",
         "transfer.savedDownloads": "已保存到“下载”",
+        "transfer.queued": "%d 项排队中",
+        "transfer.showQueue": "显示传输队列",
+        "transfer.waiting": "%d 项等待传输",
+        "transfer.savedTo": "已保存到“%@”",
         "transfer.savedFolder": "文件夹已保存到“下载”",
         "transfer.uploadedTo": "已上传到 %@",
         "transfer.uploaded": "已上传 %@",
         "transfer.deleted": "已删除",
 
         "alerts.noDevice": "未连接 Android 设备。",
+        "alerts.expiredDrag": "手机连接已改变，请重新拖入项目。",
+        "alerts.downloadDestination": "下载目录不可用或无法写入：%@",
         "alerts.noStorage": "未选择 Android 存储。",
         "alerts.selectPhone": "请先在手机上选择文件或文件夹。",
         "alerts.selectLocal": "请先在本地选择文件或文件夹。",
@@ -349,6 +389,9 @@ final class Localization {
         "general.language": "语言",
         "general.system": "跟随系统",
 
+        "updates.check": "检查更新…",
+        "updates.autoCheck": "自动检查更新",
+        "updates.autoDownload": "自动下载并安装更新",
         "settings.title": "设置",
         "settings.general": "通用",
         "settings.browsing": "浏览",

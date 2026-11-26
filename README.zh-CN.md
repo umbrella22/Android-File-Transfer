@@ -20,7 +20,7 @@
 | 双向传输 | 上传或下载文件与整个文件夹，显示递归进度，并将任务保存到持久化队列。 |
 | 管理任务 | 暂停、继续、取消和重试；重名时选择替换、保留两者或取消；批量删除手机文件与文件夹。 |
 | 快速预览 | 使用 Quick Look 预览本地文件或手机文件；手机文件会先下载到本地缓存。 |
-| 配合 Finder | 把 Finder 中的文件或文件夹拖入手机面板上传，也可以把手机文件或文件夹拖到 Finder 下载。 |
+| 配合 Finder | 把 Finder 中的文件或文件夹拖入手机面板上传，也可以把手机上的多个文件和文件夹一起拖到 Finder 窗口中保存。 |
 | 偏好设置 | 随时切换中英文、显示本地隐藏文件，并从设置打开文件访问权限引导。 |
 
 ## 连接并开始传输
@@ -40,15 +40,19 @@ shasum -a 256 -c SHA256SUMS
 
 *打开 DMG，将应用拖入右侧的 Applications，即可复制安装。*
 
-### 常用操作
+### 应用内更新
+
+从 0.2.0 起，在应用菜单中选择“检查更新…”，或在设置中启用自动检查和安装。0.1.1 及更早版本需要手动安装一次新版。请从 Applications 目录运行。Sparkle 会用应用内置的公钥验证更新清单和 DMG。macOS 仍可能根据安装目录权限和设备管理策略请求确认。
+
+## 常用操作
 
 | 操作 | 使用方式 |
 | --- | --- |
 | 打开文件夹 | 在任一面板双击文件夹。 |
 | 打开本地文件 | 双击后交给 macOS 默认应用打开。 |
-| 下载手机文件 | 双击文件，或选中后点击“下载”（`⌘D`）。 |
+| 下载到左栏当前目录 | 把手机项目拖入左栏，选中后点击“下载”（`⌘D`），或双击手机文件。 |
 | 上传本地项目 | 选中后点击“上传”（`⌘U`），或从 Finder 拖入手机面板。 |
-| 预览选中项 | 点击眼睛按钮，或使用右键菜单中的 Quick Look。 |
+| 预览选中项 | 在文件列表中按空格，点击眼睛按钮，或使用右键菜单中的 Quick Look。 |
 | 查看传输队列 | 点击工具栏中的“传输队列”（`⌘J`）。 |
 
 ## 权限与连接问题
@@ -97,18 +101,13 @@ open "$HOME/Applications/Android File Transfer.app"
 更新 [AppBundle/Info.plist](AppBundle/Info.plist) 中的 `CFBundleShortVersionString` 和 `CFBundleVersion`，提交并推送发布相关修改，然后推送 tag，启动[发布流水线](.github/workflows/release.yml)：
 
 ```sh
-git tag v0.1.1
-git push origin v0.1.1
+git tag v0.2.0
+git push origin v0.2.0
 ```
 
-所有推送的 tag 都会触发流水线。它在 macOS 15 上使用 Xcode 26.3 运行测试，构建通用版应用，生成并验证拖拽安装 DMG，随后创建带有自动生成发布说明的 GitHub Release，附带：
+发布工作流在 macOS 15 上测试通用版应用，验证一次签名升级和重启，然后将 DMG、`appcast.xml` 和 `SHA256SUMS` 一起发布到 GitHub Releases。标签必须匹配应用版本，`CFBundleVersion` 必须高于上一版。工作流可以从 Actions 中重试未完成的草稿。已发布版本保留原始附件。
 
-- `Android-File-Transfer-macOS-universal.dmg`
-- `SHA256SUMS`
-
-认证使用内置的 `GITHUB_TOKEN`，无需额外配置 secrets。重新运行流水线会替换已有 Release 中的同名附件。Tag 用于标识发布版本，不会自动改写应用内的版本号。
-
-重新构建已有 tag 时，可打开 **Actions → Release → Run workflow**，在 `tag` 字段填写版本标签。流水线会使用所选分支上的工作流，检出该 tag 的源码，并发布到对应的 Release。
+`GITHUB_TOKEN` 负责发布。Sparkle 从 Actions secret `SPARKLE_PRIVATE_ED_KEY` 读取 Ed25519 私钥，构建应用只需要 `Info.plist` 中的公钥。请安全备份私钥，后续版本需要使用同一把密钥。
 
 ## 项目结构
 
@@ -128,7 +127,6 @@ git push origin v0.1.1
 ## 当前限制
 
 - 继续任务会从头执行当前任务，不支持按字节偏移续传。
-- 从手机拖到 Finder 一次支持一个文件或文件夹；多选项目可使用“下载”。
 - 符号链接不会作为链接上传，递归上传文件夹时会跳过符号链接。
 - 尚未实现 APK、APKS、APKM、XAPK 安装，这些文件目前可以作为普通文件传输。
 - 界面语言目前提供英文与简体中文。

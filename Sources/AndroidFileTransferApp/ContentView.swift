@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import UniformTypeIdentifiers
 
 struct ContentView: View {
     @Environment(AppModel.self) private var appModel
@@ -8,11 +9,11 @@ struct ContentView: View {
     @State private var showQueue = false
 
     var body: some View {
-                @Bindable var model = appModel
+        @Bindable var model = appModel
 
         NavigationSplitView {
             SidebarView()
-                .navigationSplitViewColumnWidth(min: 220, ideal: 260, max: 320)
+                .navigationSplitViewColumnWidth(min: 220, ideal: 240, max: 320)
         } detail: {
             VStack(spacing: 0) {
                 HSplitView {
@@ -22,24 +23,7 @@ struct ContentView: View {
                         .frame(minWidth: 360, maxWidth: .infinity, maxHeight: .infinity)
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .background(
-                    TableDoubleClickMonitor { isLocal, row in
-                        if isLocal {
-                            guard appModel.local.items.indices.contains(row) else { return }
-                            appModel.local.open(appModel.local.items[row])
-                        } else {
-                            guard appModel.device.items.indices.contains(row) else { return }
-                            let item = appModel.device.items[row]
-                            if item.isFolder {
-                                Task { await appModel.device.open(item) }
-                            } else {
-                                appModel.device.selection = [item.id]
-                                appModel.downloadSelected()
-                            }
-                        }
-                    }
-                )
-                TransferBar()
+                TransferBar { showQueue = true }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         }
@@ -49,7 +33,12 @@ struct ContentView: View {
                 Button {
                     showQueue = true
                 } label: {
-                    Label(l10n.t("toolbar.transfers"), systemImage: "list.bullet")
+                    Label(
+                        l10n.t("toolbar.transfers"),
+                        systemImage: appModel.queue.hasActiveJobs
+                            ? "arrow.up.arrow.down.circle.fill"
+                            : "arrow.up.arrow.down.circle"
+                    )
                 }
                 .help(l10n.t("toolbar.transfers"))
                 .keyboardShortcut("j", modifiers: .command)
@@ -97,6 +86,8 @@ struct ContentView: View {
     }
 }
 
+// MARK: - Sidebar
+
 struct SidebarView: View {
     @Environment(AppModel.self) private var appModel
     @Environment(Localization.self) private var l10n
@@ -105,6 +96,8 @@ struct SidebarView: View {
         List {
             Section(l10n.t("sidebar.favorites")) {
                 ForEach(Favorites.all) { favorite in
+                    let isCurrent = appModel.local.currentURL.standardizedFileURL
+                        == favorite.url.standardizedFileURL
                     Button {
                         appModel.local.navigate(to: favorite.url)
                     } label: {
@@ -112,6 +105,9 @@ struct SidebarView: View {
                             l10n.t("favorites.\(favorite.id)"),
                             systemImage: favorite.systemImage
                         )
+                        .fontWeight(isCurrent ? .semibold : .regular)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
                 }
@@ -120,7 +116,7 @@ struct SidebarView: View {
             Section(l10n.t("sidebar.devices")) {
                 if let device = appModel.devices.deviceInfo {
                     VStack(alignment: .leading, spacing: 3) {
-                        Label(device.model, systemImage: "iphone")
+                        Label(device.model, systemImage: "smartphone")
                             .font(.headline)
                         Text("\(device.manufacturer) · MTP \(device.mtpVersion)")
                             .font(.caption)
@@ -129,20 +125,21 @@ struct SidebarView: View {
                     .padding(.vertical, 2)
 
                     ForEach(appModel.devices.storages) { storage in
-                        Button {
+                        StorageRow(
+                            storage: storage,
+                            isSelected: appModel.device.storage?.id == storage.id
+                        ) {
                             Task { await appModel.device.selectStorage(storage) }
-                        } label: {
-                            HStack(spacing: 6) {
-                                Label(storage.name, systemImage: "internaldrive")
-                                Spacer()
-                                if appModel.device.storage?.id == storage.id {
-                                    Image(systemName: "checkmark")
-                                        .font(.caption.weight(.semibold))
-                                }
-                            }
                         }
-                        .buttonStyle(.plain)
                     }
+                } else if appModel.devices.isConnecting {
+                    HStack(spacing: 8) {
+                        ProgressView()
+                            .controlSize(.small)
+                        Text(l10n.t("sidebar.connecting"))
+                            .foregroundStyle(.secondary)
+                    }
+                    .padding(.vertical, 2)
                 } else {
                     VStack(alignment: .leading, spacing: 6) {
                         Text(l10n.t("sidebar.noDevice"))
@@ -152,8 +149,10 @@ struct SidebarView: View {
                                 .font(.caption)
                                 .foregroundStyle(.red)
                         }
-                        Button(l10n.t("sidebar.refresh")) {
+                        Button {
                             appModel.refreshDevice()
+                        } label: {
+                            Label(l10n.t("sidebar.refresh"), systemImage: "arrow.clockwise")
                         }
                         .buttonStyle(.link)
                     }
@@ -166,88 +165,133 @@ struct SidebarView: View {
     }
 }
 
+private struct StorageRow: View {
+    @Environment(Localization.self) private var l10n
+
+    let storage: StorageItem
+    let isSelected: Bool
+    let action: () -> Void
+
+    private var usedFraction: Double {
+        guard storage.maxCapacity > 0 else { return 0 }
+        let used = storage.maxCapacity - min(storage.freeSpace, storage.maxCapacity)
+        return Double(used) / Double(storage.maxCapacity)
+    }
+
+    private var capacityText: String {
+        ByteCountFormatter.string(
+            fromByteCount: Int64(clamping: storage.maxCapacity),
+            countStyle: .file
+        )
+    }
+
+    var body: some View {
+        Button(action: action) {
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(spacing: 6) {
+                    Label(storage.name, systemImage: "internaldrive")
+                        .fontWeight(isSelected ? .semibold : .regular)
+                    Spacer(minLength: 0)
+                    if isSelected {
+                        Image(systemName: "checkmark")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(.tint)
+                    }
+                }
+
+                if storage.maxCapacity > 0 {
+                    ProgressView(value: usedFraction)
+                        .progressViewStyle(.linear)
+                        .controlSize(.small)
+                        .tint(usedFraction > 0.9 ? .orange : .accentColor)
+                    Text(l10n.t("sidebar.capacity", storage.freeSpaceText, capacityText))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .padding(.vertical, 2)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+// MARK: - Panes
+
 struct LocalPaneView: View {
     @Environment(AppModel.self) private var appModel
     @Environment(Localization.self) private var l10n
-    @State private var selectionAnchor: String?
+    @State private var isDropTargeted = false
 
     var body: some View {
         @Bindable var local = appModel.local
 
         VStack(spacing: 0) {
             PaneHeader(
-                title: local.displayPath,
+                paneImage: "laptopcomputer",
+                title: local.folderName,
+                fullPath: local.displayPath,
+                pathMenu: local.ancestors.enumerated().map { index, url in
+                    PathEntry(
+                        id: index,
+                        name: FileManager.default.displayName(atPath: url.path),
+                        systemImage: url.path == "/" ? "internaldrive" : "folder"
+                    ) {
+                        local.navigate(to: url)
+                    }
+                },
                 canGoBack: local.canGoBack,
                 canGoUp: local.canGoUp,
                 onBack: { local.goBack() },
                 onUp: { local.goUp() },
                 onRefresh: { local.reload() },
-                actionTitle: l10n.t("header.upload"),
-                actionImage: "arrow.up.circle",
+                actionTitle: l10n.t("header.uploadToPhone"),
+                actionImage: "arrow.right.circle",
+                actionHelp: l10n.t(
+                    "header.uploadHelp",
+                    appModel.device.folderName ?? l10n.t("pane.phone")
+                ),
                 actionEnabled: appModel.canUpload,
                 action: { appModel.uploadSelected() },
                 shortcut: KeyboardShortcut("u", modifiers: .command),
                 deleteEnabled: false,
                 onDelete: nil,
-                quickLookEnabled: !local.selectedItems().isEmpty,
+                quickLookEnabled: !local.selection.isEmpty,
                 onQuickLook: { appModel.quickLookSelection() }
             )
             Divider()
 
-            Table(local.items, selection: $local.selection) {
-                TableColumn(l10n.t("column.name")) { item in
-                    Label {
-                        Text(item.name)
-                    } icon: {
-                        Image(systemName: item.systemImage)
-                            .foregroundStyle(item.isFolder ? Color.accentColor : .secondary)
-                    }
-                    .simultaneousGesture(
-                        TapGesture().onEnded {
-                            selectLocalItem(item, flags: NSEvent.modifierFlags)
+            Table(
+                of: BrowserItem.self,
+                selection: $local.selection,
+                sortOrder: $local.sortOrder
+            ) {
+                BrowserTable.columns(l10n)
+            } rows: {
+                ForEach(local.items) { item in
+                    TableRow(item)
+                        .itemProvider {
+                            item.url.flatMap { NSItemProvider(contentsOf: $0) }
                         }
-                    )
-                    .onDrag {
-                        if let url = item.url {
-                            return NSItemProvider(contentsOf: url) ?? NSItemProvider()
-                        }
-                        return NSItemProvider()
-                    }
                 }
-                .width(min: 120, ideal: 190)
-
-                TableColumn(l10n.t("column.size")) { item in
-                    Text(item.sizeText)
-                        .monospacedDigit()
-                        .foregroundStyle(.secondary)
-                }
-                .width(min: 56, ideal: 75)
-
-                TableColumn(l10n.t("column.dateModified")) { item in
-                    Text(item.dateText)
-                        .foregroundStyle(.secondary)
-                }
-                .width(min: 120, ideal: 150)
             }
             .tableStyle(.inset)
             .overlay {
-                if local.isLoading {
-                    ProgressView()
+                if local.items.isEmpty, local.errorMessage == nil, !local.isLoading {
+                    Text(l10n.t("empty.folder"))
+                        .foregroundStyle(.secondary)
                 }
             }
             .contextMenu(forSelectionType: String.self) { ids in
-                Button(l10n.t("context.open")) {
-                    if let item = local.items.first(where: { ids.contains($0.id) }) {
-                        local.open(item)
-                    }
-                }
-                Button(l10n.t("header.quickLook")) {
-                    appModel.quickLookSelection()
-                }
-                Button(l10n.t("header.upload")) {
-                    appModel.uploadSelected()
-                }
-                .disabled(!appModel.canUpload)
+                menu(for: ids)
+            } primaryAction: { ids in
+                open(ids)
+            }
+            .onKeyPress(.space) {
+                guard !local.selection.isEmpty else { return .ignored }
+                appModel.quickLookSelection()
+                return .handled
             }
 
             if let error = local.errorMessage {
@@ -283,42 +327,61 @@ struct LocalPaneView: View {
             PaneStatusBar(
                 count: local.items.count,
                 selection: local.selection.count,
-                freeSpace: nil
+                freeSpace: local.freeSpaceText
             )
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-        .onChange(of: local.selection) { _, selection in
-            if selection.count == 1, let id = selection.first {
-                selectionAnchor = id
+        .overlay {
+            if let drag = appModel.deviceDrag {
+                DeviceDownloadDropTarget(sequence: drag.sequence, accept: appModel.acceptDeviceDrop, isTargeted: $isDropTargeted)
             }
         }
-        .onChange(of: local.currentURL) { _, _ in
-            selectionAnchor = nil
+        .overlay {
+            if isDropTargeted, appModel.deviceDrag != nil {
+                DropHighlight(
+                    text: l10n.t("drop.download", local.folderName),
+                    systemImage: "arrow.left.circle"
+                )
+            }
         }
     }
 
-    private func selectLocalItem(
-        _ item: BrowserItem,
-        flags: NSEvent.ModifierFlags
-    ) {
-        let selection = appModel.local.selection
+    private func items(_ ids: Set<String>) -> [BrowserItem] {
+        appModel.local.items.filter { ids.contains($0.id) }
+    }
 
-        if flags.contains(.command) {
-            if selection.contains(item.id) {
-                appModel.local.selection.remove(item.id)
-            } else {
-                appModel.local.selection.insert(item.id)
-            }
-            selectionAnchor = item.id
-        } else if flags.contains(.shift),
-                  let anchorID = selectionAnchor,
-                  let anchor = appModel.local.items.firstIndex(where: { $0.id == anchorID }),
-                  let target = appModel.local.items.firstIndex(where: { $0.id == item.id }) {
-            let range = anchor <= target ? anchor...target : target...anchor
-            appModel.local.selection = Set(appModel.local.items[range].map(\.id))
+    private func open(_ ids: Set<String>) {
+        let items = items(ids)
+        if items.count == 1 {
+            appModel.local.open(items[0])
         } else {
-            appModel.local.selection = [item.id]
-            selectionAnchor = item.id
+            items.filter { !$0.isFolder }.forEach(appModel.local.open)
+        }
+    }
+
+    @ViewBuilder
+    private func menu(for ids: Set<String>) -> some View {
+        if ids.isEmpty {
+            Button(l10n.t("header.refresh")) {
+                appModel.local.reload()
+            }
+        } else {
+            Button(l10n.t("context.open")) {
+                open(ids)
+            }
+            Button(l10n.t("header.quickLook")) {
+                appModel.local.selection = ids
+                appModel.quickLookSelection()
+            }
+            Button(l10n.t("context.showInFinder")) {
+                NSWorkspace.shared.activateFileViewerSelecting(items(ids).compactMap(\.url))
+            }
+            Divider()
+            Button(l10n.t("header.uploadToPhone")) {
+                appModel.local.selection = ids
+                appModel.uploadSelected()
+            }
+            .disabled(!appModel.devices.isConnected || appModel.device.storage == nil)
         }
     }
 }
@@ -327,116 +390,93 @@ struct DevicePaneView: View {
     @Environment(AppModel.self) private var appModel
     @Environment(Localization.self) private var l10n
     @State private var isDropTargeted = false
-    @State private var selectionAnchor: String?
+
+    private var title: String {
+        appModel.device.folderName
+            ?? appModel.devices.deviceInfo?.model
+            ?? l10n.t("pane.phone")
+    }
+
+    /// Storage root and folders, innermost first.
+    private var pathMenu: [PathEntry] {
+        let device = appModel.device
+        guard let storage = device.storage else { return [] }
+        let levels = [(storage.name, "internaldrive")]
+            + device.path.map { ($0.name, "folder") }
+        return levels.enumerated().reversed().enumerated().map { index, level in
+            let (depth, (name, image)) = level
+            return PathEntry(id: index, name: name, systemImage: image) {
+                Task { await device.navigate(toDepth: depth) }
+            }
+        }
+    }
 
     var body: some View {
         @Bindable var device = appModel.device
 
         VStack(spacing: 0) {
             PaneHeader(
-                title: device.displayPath,
+                paneImage: "smartphone",
+                title: title,
+                fullPath: device.displayPath,
+                pathMenu: pathMenu,
                 canGoBack: device.canGoBack,
                 canGoUp: device.canGoUp,
                 onBack: { Task { await device.goBack() } },
                 onUp: { Task { await device.goUp() } },
                 onRefresh: { Task { await device.reload() } },
-                actionTitle: l10n.t("header.download"),
-                actionImage: "arrow.down.circle",
+                actionTitle: l10n.t("header.downloadToMac"),
+                actionImage: "arrow.left.circle",
+                actionHelp: l10n.t(
+                    "header.downloadHelp",
+                    FileManager.default.displayName(atPath: appModel.downloadDestination.path)
+                ),
                 actionEnabled: appModel.canDownload,
                 action: { appModel.downloadSelected() },
                 shortcut: KeyboardShortcut("d", modifiers: .command),
                 deleteEnabled: appModel.canDeleteDevice,
                 onDelete: { appModel.requestDeleteDeviceSelection() },
-                quickLookEnabled: device.selectedItems().contains { !$0.isFolder },
-                onQuickLook: { appModel.quickLookSelection() }
+                quickLookEnabled: appModel.canPreviewDeviceSelection,
+                onQuickLook: { appModel.quickLookSelection(preferDevice: true) }
             )
             Divider()
 
             Group {
                 if !appModel.devices.isConnected {
-                ContentUnavailableView {
-                    Label(l10n.t("empty.noDevice.title"), systemImage: "iphone.slash")
-                } description: {
-                    Text(l10n.t("empty.noDevice.description"))
-                } actions: {
-                    Button(l10n.t("empty.noDevice.refresh")) {
-                        appModel.reconnectDevice()
-                    }
-                }
-            } else if let error = device.errorMessage {
-                ContentUnavailableView {
-                    Label(l10n.t("empty.error.title"), systemImage: "exclamationmark.triangle")
-                } description: {
-                    Text(error)
-                } actions: {
-                    Button(l10n.t("empty.error.retry")) {
-                        appModel.reconnectDevice()
-                    }
-                }
-            } else if !device.isReady {
-                ContentUnavailableView {
-                    Label(l10n.t("empty.selectStorage.title"), systemImage: "internaldrive")
-                } description: {
-                    Text(l10n.t("empty.selectStorage.description"))
-                }
-            } else {
-                Table(device.items, selection: $device.selection) {
-                    TableColumn(l10n.t("column.name")) { item in
-                        Label {
-                            Text(item.name)
-                        } icon: {
-                            Image(systemName: item.systemImage)
-                                .foregroundStyle(item.isFolder ? Color.accentColor : .secondary)
+                    if appModel.devices.isConnecting {
+                        ProgressView {
+                            Text(l10n.t("sidebar.connecting"))
                         }
-                        .simultaneousGesture(
-                            TapGesture().onEnded {
-                                selectDeviceItem(item, flags: NSEvent.modifierFlags)
+                    } else {
+                        ContentUnavailableView {
+                            Label(l10n.t("empty.noDevice.title"), systemImage: "iphone.slash")
+                        } description: {
+                            Text(l10n.t("empty.noDevice.description"))
+                        } actions: {
+                            Button(l10n.t("empty.noDevice.refresh")) {
+                                appModel.reconnectDevice()
                             }
-                        )
-                        .onDrag {
-                            appModel.dragItemProvider(for: item) ?? NSItemProvider()
                         }
                     }
-                    .width(min: 120, ideal: 190)
-
-                    TableColumn(l10n.t("column.size")) { item in
-                        Text(item.sizeText)
-                            .monospacedDigit()
-                            .foregroundStyle(.secondary)
-                    }
-                    .width(min: 56, ideal: 75)
-
-                    TableColumn(l10n.t("column.dateModified")) { item in
-                        Text(item.dateText)
-                            .foregroundStyle(.secondary)
-                    }
-                    .width(min: 120, ideal: 150)
-                }
-                .tableStyle(.inset)
-                .overlay {
-                    if device.isLoading {
-                        ProgressView()
-                    }
-                }
-                .contextMenu(forSelectionType: String.self) { ids in
-                    Button(l10n.t("context.open")) {
-                        if let item = device.items.first(where: { ids.contains($0.id) }) {
-                            Task { await device.open(item) }
+                } else if let error = device.errorMessage {
+                    ContentUnavailableView {
+                        Label(l10n.t("empty.error.title"), systemImage: "exclamationmark.triangle")
+                    } description: {
+                        Text(error)
+                    } actions: {
+                        Button(l10n.t("empty.error.retry")) {
+                            appModel.reconnectDevice()
                         }
                     }
-                    Button(l10n.t("header.quickLook")) {
-                        appModel.quickLookSelection()
+                } else if !device.isReady {
+                    ContentUnavailableView {
+                        Label(l10n.t("empty.selectStorage.title"), systemImage: "internaldrive")
+                    } description: {
+                        Text(l10n.t("empty.selectStorage.description"))
                     }
-                    Button(l10n.t("header.download")) {
-                        appModel.downloadSelected()
-                    }
-                    .disabled(!appModel.canDownload)
-                    Button(l10n.t("header.delete"), role: .destructive) {
-                        appModel.requestDeleteDeviceSelection()
-                    }
-                    .disabled(!appModel.canDeleteDevice)
+                } else {
+                    deviceTable
                 }
-            }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
 
@@ -475,53 +515,127 @@ struct DevicePaneView: View {
             isDropTargeted = targeted
         }
         .overlay {
-            if isDropTargeted {
-                RoundedRectangle(cornerRadius: 12)
-                    .strokeBorder(Color.accentColor, lineWidth: 2)
-                    .padding(4)
-                    .allowsHitTesting(false)
+            if isDropTargeted, device.isReady {
+                DropHighlight(
+                    text: l10n.t("drop.upload", title),
+                    systemImage: "arrow.right.circle"
+                )
             }
-        }
-        .onChange(of: device.selection) { _, selection in
-            if selection.count == 1, let id = selection.first {
-                selectionAnchor = id
-            }
-        }
-        .onChange(of: device.storage?.id) { _, _ in
-            selectionAnchor = nil
         }
     }
 
-    private func selectDeviceItem(
-        _ item: BrowserItem,
-        flags: NSEvent.ModifierFlags
-    ) {
-        let selection = appModel.device.selection
+    private var deviceTable: some View {
+        @Bindable var device = appModel.device
 
-        if flags.contains(.command) {
-            if selection.contains(item.id) {
-                appModel.device.selection.remove(item.id)
-            } else {
-                appModel.device.selection.insert(item.id)
+        return DeviceFileTable(
+            model: appModel, items: device.items, selection: $device.selection,
+            titles: [l10n.t("column.name"), l10n.t("column.size"), l10n.t("column.dateModified")],
+            open: open, menu: { NSHostingMenu(rootView: menu(for: $0)) }
+        )
+        .overlay {
+            if device.isLoading {
+                ProgressView()
+                    .controlSize(.small)
+            } else if device.items.isEmpty {
+                Text(l10n.t("empty.folder"))
+                    .foregroundStyle(.secondary)
             }
-            selectionAnchor = item.id
-        } else if flags.contains(.shift),
-                  let anchorID = selectionAnchor,
-                  let anchor = appModel.device.items.firstIndex(where: { $0.id == anchorID }),
-                  let target = appModel.device.items.firstIndex(where: { $0.id == item.id }) {
-            let range = anchor <= target ? anchor...target : target...anchor
-            appModel.device.selection = Set(appModel.device.items[range].map(\.id))
+        }
+    }
+
+    /// Double-click or Return: open a single folder, download files.
+    private func open(_ ids: Set<String>) {
+        let device = appModel.device
+        let items = device.items.filter { ids.contains($0.id) }
+        if items.count == 1, let folder = items.first, folder.isFolder {
+            Task { await device.open(folder) }
+        } else if !items.isEmpty {
+            device.selection = ids
+            appModel.downloadSelected()
+        }
+    }
+
+    @ViewBuilder
+    private func menu(for ids: Set<String>) -> some View {
+        let device = appModel.device
+        if ids.isEmpty {
+            Button(l10n.t("header.refresh")) {
+                Task { await device.reload() }
+            }
         } else {
-            appModel.device.selection = [item.id]
-            selectionAnchor = item.id
+            Button(l10n.t("context.open")) {
+                open(ids)
+            }
+            Button(l10n.t("header.quickLook")) {
+                device.selection = ids
+                appModel.quickLookSelection(preferDevice: true)
+            }
+            .disabled(!appModel.queue.canBeginDeviceAction || device.previewItem(in: ids) == nil)
+            Divider()
+            Button(l10n.t("header.downloadToMac")) {
+                device.selection = ids
+                appModel.downloadSelected()
+            }
+            Divider()
+            Button(l10n.t("header.delete"), role: .destructive) {
+                device.selection = ids
+                appModel.requestDeleteDeviceSelection()
+            }
+            .disabled(!appModel.queue.canBeginDeviceAction)
         }
     }
+}
+
+enum BrowserTable {
+    @MainActor
+    @TableColumnBuilder<BrowserItem, KeyPathComparator<BrowserItem>>
+    static func columns(
+        _ l10n: Localization
+    ) -> some TableColumnContent<BrowserItem, KeyPathComparator<BrowserItem>> {
+        TableColumn(l10n.t("column.name"), value: \.name, comparator: .localizedStandard) { item in
+            Label {
+                Text(item.name)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            } icon: {
+                Image(systemName: item.systemImage)
+                    .foregroundStyle(item.isFolder ? Color.accentColor : .secondary)
+            }
+            .help(item.name)
+        }
+        .width(min: 140, ideal: 220)
+
+        TableColumn(l10n.t("column.size"), value: \.sortSize) { item in
+            Text(item.sizeText)
+                .monospacedDigit()
+                .foregroundStyle(.secondary)
+        }
+        .width(min: 60, ideal: 80)
+
+        TableColumn(l10n.t("column.dateModified"), value: \.sortDate) { item in
+            Text(item.dateText)
+                .foregroundStyle(.secondary)
+        }
+        .width(min: 120, ideal: 160)
+    }
+}
+
+// MARK: - Pane chrome
+
+struct PathEntry: Identifiable {
+    let id: Int
+    let name: String
+    let systemImage: String
+    let action: () -> Void
 }
 
 struct PaneHeader: View {
     @Environment(Localization.self) private var l10n
 
+    let paneImage: String
     let title: String
+    let fullPath: String
+    let pathMenu: [PathEntry]
     let canGoBack: Bool
     let canGoUp: Bool
     let onBack: () -> Void
@@ -529,6 +643,7 @@ struct PaneHeader: View {
     let onRefresh: () -> Void
     let actionTitle: String
     let actionImage: String
+    let actionHelp: String
     let actionEnabled: Bool
     let action: () -> Void
     let shortcut: KeyboardShortcut?
@@ -553,13 +668,36 @@ struct PaneHeader: View {
             .disabled(!canGoUp)
             .help(l10n.t("header.up"))
 
-            Text(title)
-                .font(.headline)
-                .lineLimit(1)
-                .truncationMode(.middle)
-                .help(title)
+            Image(systemName: paneImage)
+                .foregroundStyle(.secondary)
+                .padding(.leading, 4)
 
-            Spacer()
+            Group {
+                if pathMenu.count > 1 {
+                    Menu {
+                        ForEach(pathMenu) { entry in
+                            Button(action: entry.action) {
+                                Label(entry.name, systemImage: entry.systemImage)
+                            }
+                        }
+                    } label: {
+                        Text(title)
+                            .font(.headline)
+                    }
+                    .menuStyle(.borderlessButton)
+                    .menuIndicator(.visible)
+                    .fixedSize()
+                } else {
+                    Text(title)
+                        .font(.headline)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+            }
+            .help(fullPath.isEmpty ? title : fullPath)
+            .layoutPriority(-1)
+
+            Spacer(minLength: 8)
 
             Button(action: onQuickLook) {
                 Image(systemName: "eye")
@@ -587,10 +725,11 @@ struct PaneHeader: View {
             Button(action: action) {
                 Label(actionTitle, systemImage: actionImage)
             }
-            .buttonStyle(.bordered)
+            .buttonStyle(.borderedProminent)
             .controlSize(.small)
             .disabled(!actionEnabled)
             .keyboardShortcut(shortcut)
+            .help(actionHelp)
         }
         .padding(.horizontal, 12)
         .frame(height: 42)
@@ -616,20 +755,51 @@ struct PaneStatusBar: View {
             }
         }
         .font(.caption)
+        .monospacedDigit()
         .foregroundStyle(.secondary)
         .padding(.horizontal, 12)
         .frame(height: 24)
     }
 }
 
+struct DropHighlight: View {
+    let text: String
+    let systemImage: String
+
+    var body: some View {
+        ZStack(alignment: .bottom) {
+            RoundedRectangle(cornerRadius: 10)
+                .fill(Color.accentColor.opacity(0.08))
+            RoundedRectangle(cornerRadius: 10)
+                .strokeBorder(Color.accentColor, lineWidth: 2)
+            Label(text, systemImage: systemImage)
+                .font(.callout.weight(.medium))
+                .lineLimit(1)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 6)
+                .background(.regularMaterial, in: Capsule())
+                .padding(.bottom, 36)
+        }
+        .padding(4)
+        .allowsHitTesting(false)
+    }
+}
+
+// MARK: - Transfer bar
+
 struct TransferBar: View {
     @Environment(AppModel.self) private var appModel
     @Environment(Localization.self) private var l10n
 
+    let onShowQueue: () -> Void
+
     var body: some View {
         let transfer = appModel.transfer
+        let queue = appModel.queue
+        let queued = queue.jobs.filter { $0.state == .pending }.count
+        let paused = queue.hasPausedJobs || (queue.isPaused && queued > 0)
 
-        if transfer.isActive || transfer.errorMessage != nil {
+        if transfer.isActive || transfer.errorMessage != nil || queued > 0 || paused || queue.isAborting {
             HStack(spacing: 10) {
                 if transfer.isCompleted {
                     Image(systemName: "checkmark.circle.fill")
@@ -637,41 +807,61 @@ struct TransferBar: View {
                 } else if let fraction = transfer.fraction, transfer.isActive {
                     ProgressView(value: fraction)
                         .progressViewStyle(.linear)
-                        .frame(width: 180)
+                        .frame(width: 160)
+                    Text(fraction.formatted(.percent.precision(.fractionLength(0))))
+                        .font(.caption)
+                        .monospacedDigit()
+                        .foregroundStyle(.secondary)
+                        .frame(width: 36, alignment: .trailing)
                 } else if transfer.isActive {
                     ProgressView()
                         .controlSize(.small)
-                } else {
+                } else if transfer.errorMessage != nil {
                     Image(systemName: "exclamationmark.triangle.fill")
                         .foregroundStyle(.orange)
+                } else {
+                    Image(systemName: "clock")
+                        .foregroundStyle(.secondary)
                 }
 
                 VStack(alignment: .leading, spacing: 1) {
-                    Text(transfer.errorMessage ?? transfer.title)
-                        .font(.callout)
-                        .lineLimit(1)
-                    if !transfer.detail.isEmpty {
-                        Text(transfer.detail)
+                    Text(
+                        transfer.errorMessage
+                            ?? (transfer.isActive
+                                ? transfer.title
+                                : idleTitle(paused: paused, stopping: queue.isAborting, waiting: queued))
+                    )
+                    .font(.callout)
+                    .lineLimit(1)
+
+                    let details = [
+                        transfer.isActive ? transfer.detail : "",
+                        transfer.isActive && queued > 0 ? l10n.t("transfer.queued", queued) : "",
+                    ].filter { !$0.isEmpty }
+                    if !details.isEmpty {
+                        Text(details.joined(separator: " · "))
                             .font(.caption)
                             .foregroundStyle(.secondary)
                             .lineLimit(1)
+                            .truncationMode(.middle)
                     }
                 }
 
                 Spacer()
 
-                if transfer.isActive, !transfer.isCompleted {
-                    Button(transfer.isPaused ? l10n.t("transfer.resume") : l10n.t("transfer.pause")) {
-                        if transfer.isPaused {
-                            appModel.resumeTransfer()
-                        } else {
-                            appModel.pauseTransfer()
-                        }
+                if queue.canControlCurrent, !transfer.isCompleted {
+                    Button(l10n.t("transfer.pause")) {
+                        appModel.pauseTransfer()
                     }
                     .controlSize(.small)
 
                     Button(l10n.t("transfer.cancel")) {
                         appModel.cancelTransfer()
+                    }
+                    .controlSize(.small)
+                } else if queue.canResume, appModel.devices.isConnected {
+                    Button(l10n.t("queue.resume")) {
+                        appModel.resumeTransfer()
                     }
                     .controlSize(.small)
                 }
@@ -688,6 +878,12 @@ struct TransferBar: View {
                     }
                     .controlSize(.small)
                 }
+
+                Button(action: onShowQueue) {
+                    Image(systemName: "list.bullet")
+                }
+                .buttonStyle(.borderless)
+                .help(l10n.t("transfer.showQueue"))
             }
             .padding(.horizontal, 12)
             .frame(height: 46)
@@ -697,7 +893,15 @@ struct TransferBar: View {
             }
         }
     }
+
+    private func idleTitle(paused: Bool, stopping: Bool, waiting: Int) -> String {
+        if stopping { return l10n.t("transfer.canceling") }
+        if paused { return l10n.t("transfer.paused") }
+        return l10n.t("transfer.waiting", waiting)
+    }
 }
+
+// MARK: - Favorites
 
 struct Favorite: Identifiable {
     let id: String
@@ -722,7 +926,7 @@ enum Favorites {
             Favorite(id: "home", systemImage: "house", url: home),
             Favorite(
                 id: "desktop",
-                systemImage: "desktopcomputer",
+                systemImage: "menubar.dock.rectangle",
                 url: directory(.desktopDirectory, fallback: "Desktop")
             ),
             Favorite(

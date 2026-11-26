@@ -11,6 +11,11 @@ let package = Package(
         .executable(name: "AndroidFileTransferApp", targets: ["AndroidFileTransferApp"]),
     ],
     targets: [
+        .binaryTarget(
+            name: "Sparkle",
+            url: "https://github.com/sparkle-project/Sparkle/releases/download/2.10.1/Sparkle-for-Swift-Package-Manager.zip",
+            checksum: "4c2e48a3e50ebcc2c88a58a4c7264a1a99c3c31857ce754357afb9cdb323022a"
+        ),
         .target(
             name: "AndroidFileTransferKit",
             swiftSettings: [
@@ -23,7 +28,7 @@ let package = Package(
         ),
         .executableTarget(
             name: "AndroidFileTransferApp",
-            dependencies: ["AndroidFileTransferKit"],
+            dependencies: ["AndroidFileTransferKit", "Sparkle"],
             swiftSettings: [
                 .swiftLanguageMode(.v5),
             ],
@@ -34,6 +39,11 @@ let package = Package(
                 .linkedFramework("AppKit"),
                 .linkedFramework("QuickLookUI"),
             ]
+        ),
+        .testTarget(
+            name: "AndroidFileTransferAppTests",
+            dependencies: ["AndroidFileTransferApp"],
+            swiftSettings: [.swiftLanguageMode(.v5)]
         ),
         .testTarget(
             name: "AndroidFileTransferKitTests",

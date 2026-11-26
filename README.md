@@ -20,7 +20,7 @@ Built with Swift and SwiftUI for **macOS 15 and later**. The app communicates ov
 | Transfer | Upload and download files or entire folders, with recursive progress and a persistent job queue. |
 | Manage | Pause, resume, cancel, and retry jobs. Resolve name conflicts by replacing, keeping both, or canceling. Delete selected phone files and folders. |
 | Preview | Quick Look for local files and phone files. Phone previews are downloaded to a local cache first. |
-| Work with Finder | Drop Finder files and folders into the phone pane to upload. Drag a phone file or folder out to Finder to download. |
+| Work with Finder | Drop Finder files and folders into the phone pane to upload. Drag one or more phone files and folders into a Finder window to save them there. |
 | Make it yours | Switch between English and Simplified Chinese, show hidden local files, and open the file-access permission guide from Settings. |
 
 ## Connect and transfer
@@ -40,15 +40,19 @@ shasum -a 256 -c SHA256SUMS
 
 *Open the DMG, then drag the app onto Applications.*
 
-### Everyday actions
+### In-app updates
+
+Starting with 0.2.0, choose **Check for Updates…** in the app menu or enable automatic checking and installation in Settings. Install this version manually once if you have 0.1.1 or earlier. Run the app from Applications. Sparkle verifies the feed and DMG against the public key in the installed app. macOS can still require confirmation depending on write permissions and management policy.
+
+## Everyday actions
 
 | Action | How |
 | --- | --- |
 | Open a folder | Double-click it in either pane. |
 | Open a local file | Double-click to open it with its default macOS application. |
-| Download a phone file | Double-click it, or select it and choose **Download** (`⌘D`). |
+| Download to the current local folder | Drag phone items into the local pane, choose **Download** (`⌘D`), or double-click a phone file. |
 | Upload local items | Select them and choose **Upload** (`⌘U`), or drop files from Finder into the phone pane. |
-| Preview a selection | Use the eye button or **Quick Look** in the context menu. |
+| Preview a selection | Press Space in the file list, use the eye button, or choose **Quick Look** in the context menu. |
 | View queued transfers | Choose **Transfers** in the toolbar (`⌘J`). |
 
 ## Permissions and connection help
@@ -97,18 +101,13 @@ The script installs pinned packaging dependencies into `.build/dmg-tools`, creat
 Update `CFBundleShortVersionString` and `CFBundleVersion` in [AppBundle/Info.plist](AppBundle/Info.plist), then commit and push the release changes. Push a tag to start the [release workflow](.github/workflows/release.yml):
 
 ```sh
-git tag v0.1.1
-git push origin v0.1.1
+git tag v0.2.0
+git push origin v0.2.0
 ```
 
-Every pushed tag triggers the workflow. It uses Xcode 26.3 on macOS 15 to run tests, build the universal app, and create and verify the drag-to-install DMG. It then publishes a GitHub Release with generated notes and these attachments:
+The release workflow tests the universal app on macOS 15, verifies a signed upgrade and relaunch, then publishes the DMG, `appcast.xml`, and `SHA256SUMS` together. The tag must match the app version and `CFBundleVersion` must advance. Use Actions to retry an unfinished draft. Published releases keep their original assets.
 
-- `Android-File-Transfer-macOS-universal.dmg`
-- `SHA256SUMS`
-
-Authentication uses the built-in `GITHUB_TOKEN`; no additional secrets are required. Rerunning the workflow replaces same-named assets on an existing release. The tag identifies the release; it does not rewrite the version inside the app.
-
-To rebuild an existing tag, open **Actions → Release → Run workflow** and enter the tag in the `tag` field. This checks out the tagged source and publishes to that tag's release, using the workflow from the selected branch.
+`GITHUB_TOKEN` publishes the release. Sparkle reads its Ed25519 private key from the `SPARKLE_PRIVATE_ED_KEY` Actions secret. Building the app requires only the public key in `Info.plist`. Keep a secure backup of the private key for subsequent releases.
 
 ## Inside the project
 
@@ -128,7 +127,6 @@ To rebuild an existing tag, open **Actions → Release → Run workflow** and en
 ## Current limits
 
 - Resume restarts the current job from the beginning; transfers do not resume at a byte offset.
-- Dragging out to Finder supports one phone file or folder at a time. Use the Download action for multiple selected items.
 - Symbolic links are not uploaded as links; recursive folder uploads skip them.
 - Installing APK, APKS, APKM, or XAPK packages is not implemented. These files can be transferred like other files.
 - English and Simplified Chinese are the available interface languages.

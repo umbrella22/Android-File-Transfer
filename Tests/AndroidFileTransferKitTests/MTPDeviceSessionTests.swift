@@ -160,6 +160,69 @@ final class MTPDeviceSessionTests: XCTestCase {
         await session.closeSession()
     }
 
+    func testCancelWhileWaitingForBusLeavesOtherTransferIntact() async throws {
+        let mock = makeMock()
+        let session = MTPDeviceSession(transport: mock)
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: url) }
+        _ = try await session.openSession()
+        let entered = expectation(description: "preview owns the bus")
+        let gate = TestGate()
+        mock.beforeGetObject = { entered.fulfill(); await gate.wait() }
+        let preview = Task { try await session.download(handle: 0x102, to: url) }
+        await fulfillment(of: [entered], timeout: 3)
+        let queued = expectation(description: "queue requests the bus")
+        let job = Task {
+            try await session.withCancellableOperation {
+                queued.fulfill()
+                return try await session.storageIDs()
+            }
+        }
+        await fulfillment(of: [queued], timeout: 3)
+        job.cancel()
+        await gate.open()
+        try await preview.value
+        do {
+            _ = try await job.value
+            XCTFail("Canceled waiter ran its transaction")
+        } catch is CancellationError {}
+        XCTAssertEqual(mock.abortCount, 0)
+        XCTAssertEqual(try Data(contentsOf: url), Data("hello MTP".utf8))
+        let open = await session.isSessionOpen
+        XCTAssertTrue(open)
+        await session.closeSession()
+    }
+
+    func testCancelOwningTaskInterruptsItsTransfer() async throws {
+        let mock = makeMock()
+        let session = MTPDeviceSession(transport: mock)
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: url) }
+        _ = try await session.openSession()
+        let entered = expectation(description: "job owns the bus")
+        let aborted = expectation(description: "owner interrupted")
+        let gate = TestGate()
+        mock.beforeGetObject = { entered.fulfill(); await gate.wait() }
+        mock.onAbort = { aborted.fulfill() }
+        let job = Task {
+            try await session.withCancellableOperation {
+                try await session.download(handle: 0x102, to: url)
+            }
+        }
+        await fulfillment(of: [entered], timeout: 3)
+        job.cancel()
+        await fulfillment(of: [aborted], timeout: 3)
+        await gate.open()
+        do {
+            try await job.value
+            XCTFail("Interrupted transfer succeeded")
+        } catch {}
+        let open = await session.isSessionOpen
+        XCTAssertFalse(open)
+        XCTAssertEqual(mock.abortCount, 1)
+        await session.closeSession()
+    }
+
     func testBareResponseForEmptyObjectHandles() async throws {
         let mock = makeMock()
         mock.bareObjectHandles = true
@@ -230,5 +293,21 @@ final class MTPDeviceSessionTests: XCTestCase {
         XCTAssertEqual(try Data(contentsOf: destination), payload)
 
         await session.closeSession()
+    }
+}
+
+private actor TestGate {
+    private var isOpen = false
+    private var waiter: CheckedContinuation<Void, Never>?
+
+    func wait() async {
+        guard !isOpen else { return }
+        await withCheckedContinuation { waiter = $0 }
+    }
+
+    func open() {
+        isOpen = true
+        waiter?.resume()
+        waiter = nil
     }
 }

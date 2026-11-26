@@ -26,6 +26,11 @@ public actor MTPDeviceSession {
         }
     }
 
+    /// Identifies this connection, including when the same phone reconnects.
+    public nonisolated let instanceID = UUID()
+    @TaskLocal private static var operationOwner: UUID?
+    private var busOwner: UUID?
+
     private let transport: USBTransport
     private let reader: BufferedBulkReader
     private let configuration: Configuration
@@ -117,7 +122,9 @@ public actor MTPDeviceSession {
     }
 
     public func closeSession() async {
-        await withBus { await self._closeSession() }
+        await acquireBus()
+        defer { releaseBus() }
+        await _closeSession()
     }
 
     private func _closeSession() async {
@@ -553,6 +560,27 @@ public actor MTPDeviceSession {
         sessionOpen = false
     }
 
+    /// Cancellation can interrupt a long USB transfer, but only while a transaction
+    /// belonging to this task actually holds the bus. UI reads use the same bus.
+    public nonisolated func withCancellableOperation<T>(
+        _ operation: () async throws -> T
+    ) async throws -> T {
+        let owner = UUID()
+        return try await Self.$operationOwner.withValue(owner) {
+            try await withTaskCancellationHandler {
+                try Task.checkCancellation()
+                return try await operation()
+            } onCancel: {
+                Task { await self.abortOperation(ownedBy: owner) }
+            }
+        }
+    }
+
+    private func abortOperation(ownedBy owner: UUID) {
+        guard busOwner == owner else { return }
+        abortCurrentOperation()
+    }
+
     public func resetDevice() async throws {
         try await withBus { try await self._resetDevice() }
     }
@@ -585,16 +613,15 @@ public actor MTPDeviceSession {
         }
     }
 
-    private func withBus<T>(_ body: () async throws -> T) async rethrows -> T {
+    private func withBus<T>(_ body: () async throws -> T) async throws -> T {
         await acquireBus()
-        do {
-            let result = try await body()
+        defer {
+            busOwner = nil
             releaseBus()
-            return result
-        } catch {
-            releaseBus()
-            throw error
         }
+        busOwner = Self.operationOwner
+        if busOwner != nil { try Task.checkCancellation() }
+        return try await body()
     }
 
     private func requireSession() throws {

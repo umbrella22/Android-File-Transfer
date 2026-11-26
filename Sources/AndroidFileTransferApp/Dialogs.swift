@@ -11,7 +11,7 @@ struct ConflictSheet: View {
             Text(l10n.t("conflict.title"))
                 .font(.title2.weight(.semibold))
 
-            Text(l10n.t("conflict.message", request.names.count))
+            Text(l10n.t("conflict.message", request.totalCount))
                 .foregroundStyle(.secondary)
 
             VStack(alignment: .leading, spacing: 5) {

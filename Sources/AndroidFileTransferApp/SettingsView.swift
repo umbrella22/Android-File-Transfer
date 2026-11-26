@@ -3,6 +3,7 @@ import SwiftUI
 struct SettingsView: View {
     let appModel: AppModel
     let l10n: Localization
+    @ObservedObject var updater: AppUpdater
 
     private var appVersion: String {
         Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0.1.0"
@@ -46,10 +47,15 @@ struct SettingsView: View {
 
             Section(l10n.t("settings.about")) {
                 LabeledContent("Android File Transfer", value: l10n.t("settings.version", appVersion))
+                Toggle(l10n.t("updates.autoCheck"), isOn: Binding(get: { updater.automaticChecks }, set: updater.setAutomaticChecks))
+                Toggle(l10n.t("updates.autoDownload"), isOn: Binding(get: { updater.automaticDownloads }, set: updater.setAutomaticDownloads))
+                    .disabled(!updater.automaticChecks)
+                Button(l10n.t("updates.check")) { updater.check() }
+                    .disabled(!updater.canCheck)
             }
         }
         .formStyle(.grouped)
-        .frame(width: 440, height: 360)
+        .frame(width: 440, height: 455)
         .navigationTitle(l10n.t("settings.title"))
     }
 }

@@ -5,6 +5,7 @@ import SwiftUI
 struct AndroidFileTransferApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @State private var model = AppModel()
+    @StateObject private var updater = AppUpdater()
 
     var body: some Scene {
         WindowGroup("Android File Transfer") {
@@ -13,6 +14,7 @@ struct AndroidFileTransferApp: App {
                 .environment(model.l10n)
                 .frame(minWidth: 1100, minHeight: 640)
                 .task {
+                    updater.start { model.isBusyForUpdate }
                     model.start()
                 }
                 .onDisappear {
@@ -20,6 +22,15 @@ struct AndroidFileTransferApp: App {
                 }
         }
         .defaultSize(width: 1360, height: 820)
+        .commands {
+            CommandGroup(after: .appInfo) {
+                Button(model.l10n.t("updates.check")) { updater.check() }
+                    .disabled(!updater.canCheck)
+            }
+        }
+        .onChange(of: model.isBusyForUpdate) { _, busy in
+            if !busy { updater.resumeInstallIfIdle() }
+        }
         #if DEBUG
         .commands {
             CommandMenu(model.l10n.t("debug.menu")) {
@@ -91,7 +102,7 @@ struct AndroidFileTransferApp: App {
         #endif
 
         Settings {
-            SettingsView(appModel: model, l10n: model.l10n)
+            SettingsView(appModel: model, l10n: model.l10n, updater: updater)
         }
     }
 }

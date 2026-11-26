@@ -43,6 +43,34 @@ struct BrowserItem: Identifiable, Hashable {
         return isFolder ? "folder.fill" : "doc.fill"
     }
 
+    // The MTP size sentinel for a file represents a value beyond the 32-bit field.
+    var sortSize: Int64 { size ?? (handle != nil && !isFolder ? Int64(UInt32.max) : -1) }
+    var sortDate: Date { date ?? .distantPast }
+
+    static let defaultSortOrder = [
+        KeyPathComparator(\BrowserItem.name, comparator: .localizedStandard),
+    ]
+
+    /// Folders stay above files, like Finder; columns sort within each group.
+    static func sorted(
+        _ items: [BrowserItem],
+        using order: [KeyPathComparator<BrowserItem>]
+    ) -> [BrowserItem] {
+        items.sorted { lhs, rhs in
+            if lhs.isFolder != rhs.isFolder {
+                return lhs.isFolder
+            }
+            for comparator in order {
+                switch comparator.compare(lhs, rhs) {
+                case .orderedAscending: return true
+                case .orderedDescending: return false
+                case .orderedSame: continue
+                }
+            }
+            return lhs.name.localizedStandardCompare(rhs.name) == .orderedAscending
+        }
+    }
+
     static func from(url: URL) -> BrowserItem? {
         let keys: [URLResourceKey] = [
             .isDirectoryKey,
@@ -92,6 +120,10 @@ final class LocalBrowser {
     var isLoading = false
     var errorMessage: String?
     private(set) var accessDenied = false
+    private(set) var freeSpaceText: String?
+    var sortOrder = BrowserItem.defaultSortOrder {
+        didSet { items = BrowserItem.sorted(items, using: sortOrder) }
+    }
     var showHiddenFiles: Bool = UserDefaults.standard.bool(forKey: "showHiddenFiles") {
         didSet {
             UserDefaults.standard.set(showHiddenFiles, forKey: "showHiddenFiles")
@@ -99,8 +131,8 @@ final class LocalBrowser {
         }
     }
 
-    init() {
-        currentURL = FileManager.default.homeDirectoryForCurrentUser
+    init(directory: URL? = nil) {
+        currentURL = directory ?? FileManager.default.homeDirectoryForCurrentUser
         reload()
     }
 
@@ -116,6 +148,22 @@ final class LocalBrowser {
 
     var canGoUp: Bool { currentURL.path != "/" }
     var canGoBack: Bool { !history.isEmpty }
+
+    var folderName: String {
+        FileManager.default.displayName(atPath: currentURL.path)
+    }
+
+    /// The current folder and its ancestors, innermost first.
+    var ancestors: [URL] {
+        var result: [URL] = []
+        var url = currentURL.standardizedFileURL
+        while true {
+            result.append(url)
+            guard url.path != "/" else { break }
+            url = url.deletingLastPathComponent()
+        }
+        return result
+    }
 
     /// Directory reads must use the resolved target: `contentsOfDirectory`
     /// does not follow a symlink URL. `currentURL` keeps the user-visible path.
@@ -170,24 +218,27 @@ final class LocalBrowser {
                 includingPropertiesForKeys: nil,
                 options: showHiddenFiles ? [] : [.skipsHiddenFiles]
             )
-            items = urls.compactMap(BrowserItem.from).sorted(by: Self.sort)
+            items = BrowserItem.sorted(urls.compactMap(BrowserItem.from), using: sortOrder)
+            // Drop selections that no longer exist after a refresh.
+            selection.formIntersection(items.map(\.id))
 
             errorMessage = nil
             accessDenied = false
         } catch {
             items = []
+            selection = []
             errorMessage = error.localizedDescription
             let nsError = error as NSError
             accessDenied = nsError.domain == NSCocoaErrorDomain
                 && nsError.code == NSFileReadNoPermissionError
         }
-    }
 
-    private static func sort(_ lhs: BrowserItem, _ rhs: BrowserItem) -> Bool {
-        if lhs.isFolder != rhs.isFolder {
-            return lhs.isFolder
+        let capacity = try? listingURL
+            .resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey])
+            .volumeAvailableCapacityForImportantUsage
+        freeSpaceText = capacity.map {
+            ByteCountFormatter.string(fromByteCount: $0, countStyle: .file)
         }
-        return lhs.name.localizedStandardCompare(rhs.name) == .orderedAscending
     }
 }
 
@@ -218,14 +269,33 @@ final class DeviceBrowser {
     var errorMessage: String?
     private(set) var accessDenied = false
     private var isRecovering = false
+    var sortOrder = BrowserItem.defaultSortOrder {
+        didSet { items = BrowserItem.sorted(items, using: sortOrder) }
+    }
 
     init(manager: DeviceManager) {
         self.manager = manager
     }
 
+    /// Storage and folder names, e.g. "Internal storage › DCIM › Camera".
+    /// Empty when no storage is selected.
     var displayPath: String {
         let components = [storage?.name].compactMap { $0 } + path.map(\.name)
-        return components.isEmpty ? "Phone" : components.joined(separator: " › ")
+        return components.joined(separator: " › ")
+    }
+
+    var folderName: String? {
+        path.last?.name ?? storage?.name
+    }
+
+    /// Jumps to an ancestor: depth 0 is the storage root.
+    func navigate(toDepth depth: Int) async {
+        guard depth >= 0, depth < path.count else { return }
+        history.append(Location(parent: currentParent, path: path))
+        path = Array(path.prefix(depth))
+        currentParent = path.last?.handle ?? 0xFFFF_FFFF
+        selection = []
+        await reload()
     }
 
     var canGoUp: Bool { !path.isEmpty }
@@ -286,10 +356,12 @@ final class DeviceBrowser {
                     isSymbolicLink: false
                 )
             }
-            .sorted(by: Self.sort)
+            items = BrowserItem.sorted(items, using: sortOrder)
+            selection.formIntersection(items.map(\.id))
             errorMessage = nil
         } catch {
             items = []
+            selection = []
             errorMessage = error.localizedDescription
 
             guard allowRecovery,
@@ -372,14 +444,13 @@ final class DeviceBrowser {
         await reload()
     }
 
-    func selectedItems() -> [BrowserItem] {
-        items.filter { selection.contains($0.id) }
+    var previewItem: BrowserItem? { previewItem(in: selection) }
+
+    func previewItem(in ids: Set<String>) -> BrowserItem? {
+        items.first { ids.contains($0.id) && !$0.isFolder && $0.handle != nil }
     }
 
-    private static func sort(_ lhs: BrowserItem, _ rhs: BrowserItem) -> Bool {
-        if lhs.isFolder != rhs.isFolder {
-            return lhs.isFolder
-        }
-        return lhs.name.localizedStandardCompare(rhs.name) == .orderedAscending
+    func selectedItems() -> [BrowserItem] {
+        items.filter { selection.contains($0.id) }
     }
 }

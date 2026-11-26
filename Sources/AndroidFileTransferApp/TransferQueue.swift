@@ -29,6 +29,9 @@ struct TransferJob: Codable, Identifiable, Equatable {
     var folderPath: [String]
     var itemName: String?
     var localURLPaths: [String]?
+    /// Folder a download is saved into. Jobs persisted before this existed
+    /// decode it as nil and keep saving to Downloads.
+    var localDestinationPath: String?
 
     init(
         id: UUID = UUID(),
@@ -42,7 +45,8 @@ struct TransferJob: Codable, Identifiable, Equatable {
         storageName: String?,
         folderPath: [String],
         itemName: String?,
-        localURLPaths: [String]?
+        localURLPaths: [String]?,
+        localDestinationPath: String? = nil
     ) {
         self.id = id
         self.direction = direction
@@ -56,6 +60,7 @@ struct TransferJob: Codable, Identifiable, Equatable {
         self.folderPath = folderPath
         self.itemName = itemName
         self.localURLPaths = localURLPaths
+        self.localDestinationPath = localDestinationPath
     }
 }
 
@@ -73,6 +78,8 @@ struct TransferQueueStore {
         )
         url = base.appendingPathComponent("transfer-queue.json")
     }
+
+    init(url: URL) { self.url = url }
 
     func load() -> [TransferJob] {
         guard let data = try? Data(contentsOf: url),
@@ -106,23 +113,41 @@ final class TransferQueue {
     var runner: ((TransferJob) async throws -> Void)?
     var onAbortRequested: (() -> Void)?
 
-    private let store = TransferQueueStore()
+    private let store: TransferQueueStore
     private var worker: Task<Void, Never>?
-    private var pauseRequested = false
-    private var cancelRequested = false
+    private var currentRun: Task<Void, Error>?
+    private enum StopRequest { case pause, cancel }
+    private var stopRequest: StopRequest?
+    private var deviceActionInProgress = false
+    private var startAfterDeviceAction = false
 
-    init() {
+    init(store: TransferQueueStore = TransferQueueStore()) {
+        self.store = store
         jobs = store.load()
     }
 
-    var isAborting: Bool { pauseRequested || cancelRequested }
+    var isAborting: Bool { stopRequest != nil }
+    var hasPendingJobs: Bool { jobs.contains { $0.state == .pending } }
+    var hasPausedJobs: Bool { jobs.contains { $0.state == .paused } }
+    var hasActiveJobs: Bool { currentJobID != nil || hasPendingJobs || hasPausedJobs }
+    var canControlCurrent: Bool { currentJobID != nil && !isAborting }
+    var canResume: Bool { worker == nil && (hasPendingJobs || hasPausedJobs) }
+    var canBeginDeviceAction: Bool { !deviceActionInProgress && worker == nil }
 
-    var hasPendingJobs: Bool {
-        jobs.contains { $0.state == .pending }
+    // Preview and deletion share the transfer indicator with the worker. Reserve
+    // it before spawning either task, while still allowing jobs to be enqueued.
+    func beginDeviceAction() -> Bool {
+        guard canBeginDeviceAction else { return false }
+        deviceActionInProgress = true
+        return true
     }
 
-    var hasActiveJobs: Bool {
-        currentJobID != nil || hasPendingJobs
+    func endDeviceAction() {
+        deviceActionInProgress = false
+        if startAfterDeviceAction {
+            startAfterDeviceAction = false
+            start()
+        }
     }
 
     func enqueue(_ newJobs: [TransferJob]) {
@@ -133,7 +158,11 @@ final class TransferQueue {
     }
 
     func start() {
-        guard worker == nil, !isPaused else { return }
+        guard worker == nil, !isPaused, hasPendingJobs else { return }
+        guard !deviceActionInProgress else {
+            startAfterDeviceAction = true
+            return
+        }
         worker = Task { await processLoop() }
     }
 
@@ -142,14 +171,12 @@ final class TransferQueue {
             isPaused = true
             return
         }
-        pauseRequested = true
-        onAbortRequested?()
+        stopCurrent(.pause)
     }
 
     func resume() {
+        guard worker == nil else { return }
         isPaused = false
-        pauseRequested = false
-        cancelRequested = false
 
         var changed = false
         for index in jobs.indices where jobs[index].state == .paused {
@@ -164,14 +191,18 @@ final class TransferQueue {
     }
 
     func cancelCurrent() {
-        guard currentJobID != nil else { return }
-        cancelRequested = true
+        stopCurrent(.cancel)
+    }
+
+    private func stopCurrent(_ request: StopRequest) {
+        guard let currentRun, stopRequest == nil else { return }
+        stopRequest = request
+        currentRun.cancel()
         onAbortRequested?()
     }
 
     func cancelAll() {
-        cancelRequested = true
-        onAbortRequested?()
+        stopCurrent(.cancel)
         for index in jobs.indices where jobs[index].state == .pending || jobs[index].state == .paused {
             jobs[index].state = .canceled
         }
@@ -179,17 +210,13 @@ final class TransferQueue {
     }
 
     func retry(_ id: UUID) {
-        guard let index = jobs.firstIndex(where: { $0.id == id }) else { return }
+        guard !isAborting, let index = jobs.firstIndex(where: { $0.id == id }) else { return }
         switch jobs[index].state {
         case .failed, .canceled, .paused:
             jobs[index].state = .pending
             jobs[index].errorMessage = nil
             jobs[index].progress = nil
             isPaused = false
-            pauseRequested = false
-            if !isProcessing {
-                cancelRequested = false
-            }
             persist()
             start()
         default:
@@ -231,12 +258,12 @@ final class TransferQueue {
             worker = nil
             persist()
 
-            if !isPaused, !cancelRequested, hasPendingJobs {
+            if !isPaused, hasPendingJobs {
                 start()
             }
         }
 
-        while !isPaused, !cancelRequested {
+        while !isPaused {
             guard let index = jobs.firstIndex(where: { $0.state == .pending }) else {
                 break
             }
@@ -247,8 +274,14 @@ final class TransferQueue {
             jobs[index].errorMessage = nil
             persist()
 
-            do {
+            let run = Task { [runner] in
+                try Task.checkCancellation()
                 try await runner?(job)
+                return ()
+            }
+            currentRun = run
+            do {
+                try await run.value
                 if let idx = jobs.firstIndex(where: { $0.id == job.id }) {
                     jobs[idx].state = .completed
                     jobs[idx].progress = 1
@@ -256,10 +289,10 @@ final class TransferQueue {
                 }
             } catch {
                 if let idx = jobs.firstIndex(where: { $0.id == job.id }) {
-                    if pauseRequested {
+                    if stopRequest == .pause {
                         jobs[idx].state = .paused
                         jobs[idx].errorMessage = nil
-                    } else if cancelRequested || Task.isCancelled || error is CancellationError {
+                    } else if stopRequest == .cancel || error is CancellationError {
                         jobs[idx].state = .canceled
                         jobs[idx].errorMessage = nil
                     } else {
@@ -269,15 +302,13 @@ final class TransferQueue {
                 }
             }
 
+            currentRun = nil
             currentJobID = nil
-            persist()
-
-            if pauseRequested || cancelRequested {
-                if pauseRequested {
-                    isPaused = true
-                }
-                break
+            if let request = stopRequest {
+                stopRequest = nil
+                isPaused = request == .pause || hasPendingJobs
             }
+            persist()
         }
     }
 

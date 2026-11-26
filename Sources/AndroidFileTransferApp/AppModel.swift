@@ -1,7 +1,6 @@
 import AppKit
 import Foundation
 import AndroidFileTransferKit
-import UniformTypeIdentifiers
 import Observation
 
 @MainActor
@@ -9,14 +8,17 @@ import Observation
 final class AppModel {
     let l10n = Localization()
     let devices = DeviceManager()
-    let local = LocalBrowser()
+    let local: LocalBrowser
     let device: DeviceBrowser
     let transfer: TransferStatus
-    let queue = TransferQueue()
+    let queue: TransferQueue
+    private let previewCache: DevicePreviewCache
+    private let showPreview: @MainActor ([URL]) -> Void
 
     var alertMessage: String?
     var pendingDelete: DeviceDeleteRequest?
     var conflictRequest: ConflictRequest?
+    private(set) var deviceDrag: DeviceDownloadDrag?
 
     private var transferTask: Task<Void, Never>?
     private var conflictContinuation: CheckedContinuation<ConflictResolution, Never>?
@@ -24,7 +26,13 @@ final class AppModel {
     private var lastFailedDownloadItems: [BrowserItem]?
     private var lastFailedUploadItems: [BrowserItem]?
 
-    init() {
+    init(queueStore: TransferQueueStore = TransferQueueStore(), localDirectory: URL? = nil,
+         previewDirectory: URL = FileManager.default.temporaryDirectory,
+         showPreview: @escaping @MainActor ([URL]) -> Void = { QuickLookController.shared.show(urls: $0) }) {
+        queue = TransferQueue(store: queueStore)
+        local = LocalBrowser(directory: localDirectory)
+        previewCache = DevicePreviewCache(directory: previewDirectory)
+        self.showPreview = showPreview
         device = DeviceBrowser(manager: devices)
         transfer = TransferStatus(l10n: l10n)
 
@@ -33,7 +41,7 @@ final class AppModel {
             try await self.executeQueuedJob(job)
         }
         queue.onAbortRequested = { [weak self] in
-            self?.abortActiveTransfer()
+            self?.resolveConflict(.cancel)
         }
     }
 
@@ -46,55 +54,75 @@ final class AppModel {
         devices.stop()
     }
 
+    // Downloads and uploads go through the queue, so they can be enqueued
+    // while another transfer is running.
     var canDownload: Bool {
-        !transfer.isActive
-            && devices.isConnected
+        devices.isConnected
             && device.selectedItems().contains { $0.handle != nil }
     }
 
     var canUpload: Bool {
-        !transfer.isActive
-            && devices.isConnected
+        devices.isConnected
             && device.storage != nil
             && !local.selectedItems().isEmpty
     }
 
     var canDeleteDevice: Bool {
-        !transfer.isActive
+        queue.canBeginDeviceAction
             && devices.isConnected
             && device.storage != nil
             && !device.selectedItems().isEmpty
     }
 
-    var canQuickLook: Bool {
-        !local.selectedItems().isEmpty
-            || device.selectedItems().contains { !$0.isFolder && $0.handle != nil }
+    var canPreviewDeviceSelection: Bool {
+        queue.canBeginDeviceAction && device.previewItem != nil
+    }
+
+    private var activeFinderExports = 0
+    var isBusyForUpdate: Bool { !queue.canBeginDeviceAction || activeFinderExports > 0 || transfer.isActive }
+
+    var downloadDestination: URL { local.currentURL }
+
+    private func downloadSource(for item: BrowserItem) -> DeviceDownloadSource? {
+        guard item.handle != nil, let session = devices.session, let storage = device.storage else { return nil }
+        return DeviceDownloadSource(sessionID: session.instanceID, storageID: storage.id,
+                                    storageName: storage.name, folderPath: device.path.map(\.name), name: item.name)
     }
 
     func downloadSelected() {
-        guard let storage = device.storage else {
+        guard device.storage != nil else {
             alertMessage = l10n.t("alerts.noStorage")
             return
         }
-        let items = device.selectedItems()
-        guard !items.isEmpty else {
+        let jobs = device.selectedItems().compactMap(downloadSource).map { $0.job(to: downloadDestination) }
+        guard !jobs.isEmpty else {
             alertMessage = l10n.t("alerts.selectPhone")
             return
         }
+        queue.enqueue(jobs)
+    }
 
-        let folderPath = device.path.map(\.name)
-        let jobs = items.map { item in
-            TransferJob(
-                direction: .download,
-                displayName: item.name,
-                storageID: storage.id,
-                storageName: storage.name,
-                folderPath: folderPath,
-                itemName: item.name,
-                localURLPaths: nil
-            )
+    func beginDeviceDrag(sequence: Int, items: [BrowserItem]) {
+        let sources = items.compactMap(downloadSource)
+        guard !sources.isEmpty, sources.count == items.count else {
+            deviceDrag = nil
+            return
+        }
+        deviceDrag = DeviceDownloadDrag(sequence: sequence, sources: sources)
+    }
+
+    func endDeviceDrag(sequence: Int) {
+        if deviceDrag?.sequence == sequence { deviceDrag = nil }
+    }
+
+    func acceptDeviceDrop(sequence: Int) -> Bool {
+        guard let drag = deviceDrag, drag.sequence == sequence else { return false }
+        guard let session = devices.session, let jobs = drag.jobs(sessionID: session.instanceID, to: downloadDestination) else {
+            alertMessage = l10n.t("alerts.expiredDrag")
+            return false
         }
         queue.enqueue(jobs)
+        return true
     }
 
     func uploadSelected() {
@@ -137,13 +165,6 @@ final class AppModel {
         queue.cancelCurrent()
     }
 
-    func abortActiveTransfer() {
-        guard let session = devices.session else { return }
-        Task {
-            await session.abortCurrentOperation()
-        }
-    }
-
     func pauseTransfer() {
         queue.pause()
     }
@@ -184,12 +205,15 @@ final class AppModel {
     func confirmDeleteDeviceSelection() {
         guard let request = pendingDelete else { return }
         pendingDelete = nil
-        guard !transfer.isActive else {
+        guard queue.beginDeviceAction() else {
             alertMessage = l10n.t("alerts.transferRunning")
             return
         }
         abortCurrentTransferOnCancel = false
-        transferTask = Task { await performDelete(request) }
+        transferTask = Task {
+            defer { queue.endDeviceAction() }
+            await performDelete(request)
+        }
     }
 
     func cancelDeleteDeviceSelection() {
@@ -265,84 +289,30 @@ final class AppModel {
     }
 
     private func askConflictResolution(names: [String]) async -> ConflictResolution {
+        guard !Task.isCancelled else { return .cancel }
         guard !names.isEmpty else { return .keepBoth }
         return await withCheckedContinuation { continuation in
             conflictContinuation = continuation
-            conflictRequest = ConflictRequest(names: Array(names.prefix(6)))
+            conflictRequest = ConflictRequest(
+                names: Array(names.prefix(6)),
+                totalCount: names.count
+            )
         }
     }
 
-    func dragItemProvider(for item: BrowserItem) -> NSItemProvider? {
-        guard let handle = item.handle,
-              let session = devices.session,
-              let storageID = device.storage?.id
-        else {
-            return nil
-        }
-
-        let provider = NSItemProvider()
-        provider.suggestedName = item.name
-
-        if item.isFolder {
-            provider.registerFileRepresentation(
-                forTypeIdentifier: UTType.folder.identifier,
-                fileOptions: [],
-                visibility: .all
-            ) { completion in
-                Task {
-                    do {
-                        let directory = FileManager.default.temporaryDirectory
-                            .appendingPathComponent("AndroidFileTransferDrag", isDirectory: true)
-                            .appendingPathComponent(UUID().uuidString, isDirectory: true)
-                        let folder = directory.appendingPathComponent(
-                            item.name,
-                            isDirectory: true
-                        )
-                        try FileManager.default.createDirectory(
-                            at: folder,
-                            withIntermediateDirectories: true
-                        )
-                        try await self.downloadFolderTree(
-                            handle: handle,
-                            to: folder,
-                            session: session,
-                            storageID: storageID
-                        )
-                        completion(folder, false, nil)
-                    } catch {
-                        completion(nil, false, error)
-                    }
-                }
-                return nil
+    func filePromise(for item: BrowserItem) -> DeviceFilePromise? {
+        guard let handle = item.handle, let session = devices.session, let storage = device.storage else { return nil }
+        return DeviceFilePromise(name: item.name, isFolder: item.isFolder) { destination in
+            guard self.devices.session === session else { throw MTPError.notOpen }
+            self.activeFinderExports += 1
+            defer { self.activeFinderExports -= 1 }
+            if item.isFolder {
+                try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: false)
+                try await self.downloadFolderTree(handle: handle, to: destination, session: session, storageID: storage.id)
+            } else {
+                try await session.download(handle: handle, to: destination)
             }
-            return provider
         }
-
-        let type = UTType(filenameExtension: (item.name as NSString).pathExtension) ?? .data
-        provider.registerFileRepresentation(
-            forTypeIdentifier: type.identifier,
-            fileOptions: [],
-            visibility: .all
-        ) { completion in
-            Task {
-                do {
-                    let directory = FileManager.default.temporaryDirectory
-                        .appendingPathComponent("AndroidFileTransferDrag", isDirectory: true)
-                        .appendingPathComponent(UUID().uuidString, isDirectory: true)
-                    try FileManager.default.createDirectory(
-                        at: directory,
-                        withIntermediateDirectories: true
-                    )
-                    let url = directory.appendingPathComponent(item.name)
-                    try await session.download(handle: handle, to: url)
-                    completion(url, false, nil)
-                } catch {
-                    completion(nil, false, error)
-                }
-            }
-            return nil
-        }
-        return provider
     }
 
     private func downloadFolderTree(
@@ -375,38 +345,28 @@ final class AppModel {
         }
     }
 
-    func quickLookSelection() {
-        if let item = local.selectedItems().first, let url = item.url {
-            QuickLookController.shared.show(urls: [url])
+    func quickLookSelection(preferDevice: Bool = false) {
+        if !preferDevice, let url = local.selectedItems().first?.url {
+            showPreview([url])
             return
         }
-
-        guard let session = devices.session,
-              let item = device.selectedItems().first,
-              !item.isFolder,
-              let handle = item.handle
-        else {
-            alertMessage = l10n.t("alerts.selectPhone")
-            return
-        }
-
-        Task {
+        guard let session = devices.session, let item = device.previewItem,
+              let handle = item.handle, queue.beginDeviceAction() else { return }
+        transferTask = Task {
+            defer {
+                transferTask = nil
+                queue.endDeviceAction()
+            }
             transfer.start(title: l10n.t("transfer.preparing", item.name), total: item.size)
             do {
-                let cacheRoot = FileManager.default.urls(
-                    for: .cachesDirectory,
-                    in: .userDomainMask
-                ).first!.appendingPathComponent("AndroidFileTransfer/QuickLook", isDirectory: true)
-                try FileManager.default.createDirectory(
-                    at: cacheRoot,
-                    withIntermediateDirectories: true
-                )
-                let destination = cacheRoot.appendingPathComponent(item.name)
-                if !FileManager.default.fileExists(atPath: destination.path) {
-                    try await session.download(handle: handle, to: destination)
+                let url = try await previewCache.file(for: item, handle: handle, sessionID: session.instanceID) {
+                    try await session.download(handle: handle, to: $0)
                 }
+                guard devices.session === session else { throw CancellationError() }
                 transfer.finish(detail: item.name)
-                QuickLookController.shared.show(urls: [destination])
+                showPreview([url])
+            } catch is CancellationError {
+                transfer.canceled()
             } catch {
                 transfer.fail(error)
                 alertMessage = error.localizedDescription
@@ -511,11 +471,25 @@ final class AppModel {
     }
 
     private func executeQueuedJob(_ job: TransferJob) async throws {
+        guard let session = devices.session else {
+            transfer.fail(MTPError.notOpen)
+            throw MTPError.notOpen
+        }
         do {
-            try await runQueuedJob(job)
+            try await session.withCancellableOperation {
+                try await self.runQueuedJob(job, session: session)
+            }
+            if job.direction == .upload, devices.session === session {
+                // Listing the pane is separate from the already committed upload.
+                await device.reload()
+            }
         } catch {
             if queue.isAborting || error is CancellationError {
                 transfer.canceled()
+                if queue.isAborting, !(await session.isSessionOpen), devices.session === session {
+                    // Recovery must outlive the canceled job task. The worker waits for it.
+                    await Task { await self.recoverAfterAbortedTransfer() }.value
+                }
             } else {
                 transfer.fail(error)
             }
@@ -523,10 +497,18 @@ final class AppModel {
         }
     }
 
-    private func runQueuedJob(_ job: TransferJob) async throws {
-        guard let session = devices.session else {
-            throw MTPError.notOpen
+    func downloadFolder(for job: TransferJob) throws -> URL {
+        guard let path = job.localDestinationPath else { return downloadsDirectory }
+        var directory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: path, isDirectory: &directory), directory.boolValue,
+              FileManager.default.isWritableFile(atPath: path) else {
+            throw CocoaError(.fileWriteUnknown, userInfo: [NSFilePathErrorKey: path,
+                NSLocalizedDescriptionKey: l10n.t("alerts.downloadDestination", path)])
         }
+        return URL(fileURLWithPath: path, isDirectory: true)
+    }
+
+    private func runQueuedJob(_ job: TransferJob, session: MTPDeviceSession) async throws {
         guard let storage = resolveStorage(for: job) else {
             throw MTPError.invalidResponse("storage not found")
         }
@@ -536,12 +518,12 @@ final class AppModel {
         switch job.direction {
         case .download:
             transfer.start(title: l10n.t("transfer.preparing", job.displayName), total: nil)
+            let downloads = try downloadFolder(for: job)
             let item = try await resolveDownloadItem(
                 job: job,
                 storage: storage,
                 session: session
             )
-            let downloads = downloadsDirectory
             let destination = downloads.appendingPathComponent(item.name)
 
             let resolution: ConflictResolution
@@ -560,26 +542,19 @@ final class AppModel {
                 storageID: storage.id
             )
 
-            do {
-                try await executeDownload(
-                    plan: plan,
-                    session: session,
-                    downloads: downloads,
-                    conflictResolution: resolution
-                ) { progress in
-                    Task { @MainActor in
-                        self.queue.setProgress(job.id, progress: progress)
-                    }
+            _ = try downloadFolder(for: job)
+            try await executeDownload(
+                plan: plan,
+                session: session,
+                downloads: downloads,
+                conflictResolution: resolution
+            ) { progress in
+                Task { @MainActor in
+                    self.queue.setProgress(job.id, progress: progress)
                 }
-                if local.currentURL.standardizedFileURL == downloads.standardizedFileURL {
-                    local.reload()
-                }
-            } catch {
-                if queue.isAborting {
-                    transfer.canceled()
-                    await recoverAfterAbortedTransfer()
-                }
-                throw error
+            }
+            if local.currentURL.standardizedFileURL == downloads.standardizedFileURL {
+                local.reload()
             }
 
         case .upload:
@@ -617,31 +592,22 @@ final class AppModel {
             }
 
             var usedNames = existingNames
-            do {
-                for item in items {
-                    let plan = try makeUploadPlan(for: item)
-                    let rootName = try await executeUpload(
-                        plan: plan,
-                        session: session,
-                        storageID: storage.id,
-                        existingNames: usedNames,
-                        conflictResolution: resolution,
-                        destinationParent: parent,
-                        existingItems: existingItems
-                    ) { progress in
-                        Task { @MainActor in
-                            self.queue.setProgress(job.id, progress: progress)
-                        }
+            for item in items {
+                let plan = try makeUploadPlan(for: item)
+                let rootName = try await executeUpload(
+                    plan: plan,
+                    session: session,
+                    storageID: storage.id,
+                    existingNames: usedNames,
+                    conflictResolution: resolution,
+                    destinationParent: parent,
+                    existingItems: existingItems
+                ) { progress in
+                    Task { @MainActor in
+                        self.queue.setProgress(job.id, progress: progress)
                     }
-                    usedNames.insert(rootName)
                 }
-                await device.reload()
-            } catch {
-                if queue.isAborting {
-                    transfer.canceled()
-                    await recoverAfterAbortedTransfer()
-                }
-                throw error
+                usedNames.insert(rootName)
             }
         }
     }
@@ -851,6 +817,7 @@ final class AppModel {
         conflictResolution: ConflictResolution,
         onProgress: ((Double?) -> Void)? = nil
     ) async throws {
+        try Task.checkCancellation()
         let destinationURL = downloads.appendingPathComponent(plan.rootName)
         let destinationRoot: URL
         if FileManager.default.fileExists(atPath: destinationURL.path) {
@@ -931,9 +898,10 @@ final class AppModel {
 
         finished = true
         transfer.finish(
-            detail: plan.isDirectory
-                ? l10n.t("transfer.savedFolder")
-                : l10n.t("transfer.savedDownloads")
+            detail: l10n.t(
+                "transfer.savedTo",
+                FileManager.default.displayName(atPath: downloads.path)
+            )
         )
     }
 
@@ -1402,39 +1370,24 @@ final class AppModel {
     }
 
     func debugTestDragProvider() {
-        guard let file = device.items.first(where: { !$0.isFolder && $0.handle != nil }),
-              let provider = dragItemProvider(for: file),
-              let type = provider.registeredTypeIdentifiers.first
-        else {
+        guard let file = device.items.first(where: { !$0.isFolder && $0.handle != nil }) else {
             alertMessage = l10n.t("alerts.noDeviceFile")
             return
         }
+        debugExport(file, named: "AndroidFileTransferDragTest-\(file.name)")
+    }
 
-        let downloads = FileManager.default.urls(
-            for: .downloadsDirectory,
-            in: .userDomainMask
-        ).first ?? FileManager.default.homeDirectoryForCurrentUser
-
-        provider.loadFileRepresentation(forTypeIdentifier: type) { url, error in
-            guard let url else {
-                DispatchQueue.main.async {
-                    self.alertMessage = error?.localizedDescription ?? "Drag provider failed"
-                }
-                return
-            }
-
-            // The URL is only valid while this handler runs; copy immediately.
-            let destination = downloads.appendingPathComponent("AndroidFileTransferDragTest-\(file.name)")
+    private func debugExport(_ item: BrowserItem, named name: String) {
+        guard let promise = filePromise(for: item) else { return }
+        let downloads = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first
+            ?? FileManager.default.homeDirectoryForCurrentUser
+        let destination = uniqueDestination(downloads.appendingPathComponent(name), isDirectory: item.isFolder)
+        Task {
             do {
-                try? FileManager.default.removeItem(at: destination)
-                try FileManager.default.copyItem(at: url, to: destination)
-                DispatchQueue.main.async {
-                    NSWorkspace.shared.activateFileViewerSelecting([destination])
-                }
+                try await promise.write(to: destination)
+                NSWorkspace.shared.activateFileViewerSelecting([destination])
             } catch {
-                DispatchQueue.main.async {
-                    self.alertMessage = error.localizedDescription
-                }
+                alertMessage = error.localizedDescription
             }
         }
     }
@@ -1493,41 +1446,11 @@ final class AppModel {
     }
 
     func debugTestFolderDragProvider() {
-        guard let folder = device.items.first(where: {
-            $0.isFolder && $0.name == "AndroidFileTransferKitUITest"
-        }),
-              let provider = dragItemProvider(for: folder),
-              let type = provider.registeredTypeIdentifiers.first
-        else {
+        guard let folder = device.items.first(where: { $0.isFolder && $0.name == "AndroidFileTransferKitUITest" }) else {
             alertMessage = l10n.t("alerts.testFolderNotFound")
             return
         }
-
-        let downloads = FileManager.default.urls(
-            for: .downloadsDirectory,
-            in: .userDomainMask
-        ).first ?? FileManager.default.homeDirectoryForCurrentUser
-
-        provider.loadFileRepresentation(forTypeIdentifier: type) { url, error in
-            guard let url else {
-                DispatchQueue.main.async {
-                    self.alertMessage = error?.localizedDescription ?? "Folder provider failed"
-                }
-                return
-            }
-            let destination = downloads.appendingPathComponent("AndroidFileTransferFolderDragTest")
-            do {
-                try? FileManager.default.removeItem(at: destination)
-                try FileManager.default.copyItem(at: url, to: destination)
-                DispatchQueue.main.async {
-                    NSWorkspace.shared.activateFileViewerSelecting([destination])
-                }
-            } catch {
-                DispatchQueue.main.async {
-                    self.alertMessage = error.localizedDescription
-                }
-            }
-        }
+        debugExport(folder, named: "AndroidFileTransferFolderDragTest")
     }
 
     func debugQuickLookFirstDeviceFile() {
@@ -1536,7 +1459,7 @@ final class AppModel {
             return
         }
         device.selection = [file.id]
-        quickLookSelection()
+        quickLookSelection(preferDevice: true)
     }
 
     func debugQuickLookHomeFile(named name: String) {
@@ -1568,7 +1491,9 @@ struct DeviceDeleteRequest: Identifiable {
 
 struct ConflictRequest: Identifiable {
     let id = UUID()
+    /// The first few conflicting names, for display.
     let names: [String]
+    let totalCount: Int
 }
 
 enum ConflictResolution: Equatable {
