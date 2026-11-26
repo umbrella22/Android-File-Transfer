@@ -8,7 +8,7 @@ if (( $# > 0 )); then
     shift
 fi
 INSTALL=false
-BUILD_ARGS=(-c "$CONFIG")
+BUILD_ARGS=(-c "$CONFIG" -Xlinker -rpath -Xlinker @executable_path/../Frameworks)
 for option in "$@"; do
     case "$option" in
         --install) INSTALL=true ;;
@@ -27,7 +27,7 @@ swift build "${BUILD_ARGS[@]}"
 BIN_DIR="$(swift build "${BUILD_ARGS[@]}" --show-bin-path)"
 
 rm -rf "$APP_DIR"
-mkdir -p "$APP_DIR/Contents/MacOS" "$APP_DIR/Contents/Resources"
+mkdir -p "$APP_DIR/Contents/MacOS" "$APP_DIR/Contents/Resources" "$APP_DIR/Contents/Frameworks"
 
 cp "${BIN_DIR}/${EXECUTABLE}" "$APP_DIR/Contents/MacOS/${EXECUTABLE}"
 cp "AppBundle/Info.plist" "$APP_DIR/Contents/Info.plist"
@@ -36,7 +36,12 @@ for lproj in AppBundle/*.lproj; do
     [[ -d "$lproj" ]] && cp -R "$lproj" "$APP_DIR/Contents/Resources/"
 done
 
-codesign --force --deep --sign - "$APP_DIR" >/dev/null 2>&1 || true
+# Preserve the framework's signed nested helpers, entitlements and versioned symlinks.
+frameworks=(.build/artifacts/*/Sparkle/Sparkle.xcframework/macos-arm64_x86_64/Sparkle.framework(N))
+(( ${#frameworks} == 1 )) || { print -u2 'Expected one resolved Sparkle framework'; exit 1; }
+ditto "${frameworks[1]}" "$APP_DIR/Contents/Frameworks/Sparkle.framework"
+codesign --force --sign - "$APP_DIR"
+codesign --verify --deep --strict "$APP_DIR"
 
 echo "Built $APP_DIR"
 

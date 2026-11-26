@@ -15,21 +15,21 @@ struct TransferQueueView: View {
 
                 Spacer()
 
-                if queue.isPaused || queue.jobs.contains(where: { $0.state == .paused }) {
+                if queue.canResume && (queue.isPaused || queue.hasPausedJobs) {
                     Button(l10n.t("queue.resume")) {
                         queue.resume()
                     }
-                } else if queue.hasPendingJobs, !queue.isProcessing {
+                } else if queue.canResume {
                     Button(l10n.t("queue.start")) {
                         queue.resume()
                     }
-                } else if queue.isProcessing {
+                } else if queue.canControlCurrent {
                     Button(l10n.t("queue.pause")) {
                         queue.pause()
                     }
                 }
 
-                if queue.isProcessing {
+                if queue.canControlCurrent {
                     Button(l10n.t("queue.cancelCurrent")) {
                         queue.cancelCurrent()
                     }
@@ -108,7 +108,7 @@ struct TransferQueueView: View {
 
             Spacer()
 
-            if job.state == .running {
+            if job.state == .running, appModel.queue.canControlCurrent {
                 Button(l10n.t("queue.cancelCurrent")) {
                     appModel.queue.cancelCurrent()
                 }
@@ -117,6 +117,7 @@ struct TransferQueueView: View {
                 Button(l10n.t("queue.retry")) {
                     appModel.queue.retry(job.id)
                 }
+                .disabled(appModel.queue.isAborting)
                 .controlSize(.small)
             }
 

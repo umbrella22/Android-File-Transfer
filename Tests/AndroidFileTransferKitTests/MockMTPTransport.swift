@@ -10,6 +10,17 @@ final class MockMTPTransport: USBTransport {
         let contents: Data
     }
 
+    // Optional suspension point for testing cancellation while the USB bus is in use.
+    var beforeGetObject: (() async -> Void)?
+    var onAbort: (() -> Void)?
+    private(set) var abortCount = 0
+
+    func abort() {
+        abortCount += 1
+        close()
+        onAbort?()
+    }
+
     var isOpen = false
     let bulkInMaxPacketSize = 512
     let bulkOutMaxPacketSize = 512
@@ -154,6 +165,8 @@ final class MockMTPTransport: USBTransport {
             enqueueResponse(transactionID: container.transactionID, code: .ok)
 
         case .getObject:
+            await beforeGetObject?()
+            guard isOpen else { throw USBTransportError.closed }
             guard let handle = container.parameters.first,
                   let file = files.first(where: { $0.handle == handle })
             else {
